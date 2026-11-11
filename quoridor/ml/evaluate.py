@@ -30,8 +30,6 @@ def main(argv=None) -> dict:
     if a.baseline:
         r = match(alphabeta_policy(a.baseline), alphabeta_policy(a.opponent_depth), a.games, a.seed, a.opening_plies)
     elif a.model:
-        import torch
-
         from .model import load_model
         from .selfplay import GameSettings, default_workers, run_eval, serialize_model, worker_init
 
@@ -46,7 +44,6 @@ def main(argv=None) -> dict:
              "win_rate": wins / a.games, "wilson_low": wilson_lower_bound(wins, a.games),
              "avg_plies": sum(x["plies"] for x in res) / a.games,
              "trained_iterations": ckpt.get("iteration")}
-        del torch
     else:
         p.error("give --model or --baseline")
     r["seconds"] = round(time.time() - t0, 1)

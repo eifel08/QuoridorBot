@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import multiprocessing as mp
 import random
 import sys
@@ -38,7 +37,7 @@ import torch
 import torch.nn.functional as F
 
 from .arena import wilson_lower_bound
-from .encoding import MIRROR_PERM, N_ACTIONS
+from .encoding import N_ACTIONS, mirror_batch
 from .model import ModelConfig, PolicyValueNet, save_checkpoint
 from .selfplay import (GameSettings, default_workers, run_eval, run_teacher, run_training,
                        serialize_model, worker_init)
@@ -130,16 +129,6 @@ class ReplayBuffer:
         self.pos = int(d["pos"]) % self.capacity if n == self.capacity else n
 
 
-def mirror_batch(planes: np.ndarray, pis: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Left-right mirror augmentation (the game is symmetric)."""
-    out = planes[..., ::-1].copy()
-    # Wall planes are 8x8 maps padded to 9x9: mirror only the 8x8 part.
-    out[:, 2:4, :8, :8] = planes[:, 2:4, :8, :8][..., ::-1]
-    out[:, 2:4, :, 8] = 0
-    return out, pis[:, MIRROR_PERM]
-
-
-# ---------------------------------------------------------------------- #
 class Trainer:
     def __init__(self, cfg: TrainConfig, out: Path) -> None:
         self.cfg = cfg

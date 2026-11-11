@@ -56,7 +56,7 @@ class TestEncoding(unittest.TestCase):
         self.assertEqual(x0.shape, (8, 9, 9))
 
     def test_mirror_batch_matches_mirrored_encoding(self):
-        from quoridor.ml.train import mirror_batch
+        from quoridor.ml.encoding import mirror_batch
         for st in STATES[::7]:
             b = FastBoard(st)
             pi = legal_mask(b).astype(np.float32)

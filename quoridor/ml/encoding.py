@@ -82,6 +82,18 @@ def mirror_action(action: int) -> int:
 MIRROR_PERM = np.array([mirror_action(a) for a in range(N_ACTIONS)], dtype=np.int64)
 
 
+def mirror_batch(planes: np.ndarray, pis: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Left-right mirror augmentation (the game is symmetric)."""
+    out = planes[..., ::-1].copy()
+    # Wall planes are 8x8 maps padded to 9x9: mirror only the 8x8 part.
+    out[:, 2:4, :8, :8] = planes[:, 2:4, :8, :8][..., ::-1]
+    out[:, 2:4, :, 8] = 0
+    return out, pis[:, MIRROR_PERM]
+
+
+# ---------------------------------------------------------------------- #
+
+
 # ---------------------------------------------------------------------- #
 def _distance_map(board: FastBoard, goal_row: int) -> np.ndarray:
     """BFS distance from every square to ``goal_row`` (pawns ignored)."""

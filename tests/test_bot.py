@@ -1,5 +1,4 @@
 import json
-import random
 import shutil
 import subprocess
 import unittest

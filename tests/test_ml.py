@@ -158,6 +158,22 @@ class TestModelAndSearch(unittest.TestCase):
             game = Game(agent, AlphaBetaBot("bot", 1, None), max_invalid_attempts=1)
             self.assertIn(game.run(), (0, 1))
 
+    def test_revert_to_best(self):
+        from quoridor.ml.train import Trainer, TrainConfig
+        with tempfile.TemporaryDirectory() as d:
+            t = Trainer(TrainConfig(channels=8, blocks=1, workers=1, buffer_size=10), Path(d))
+            try:
+                t.save("best.pt")
+                saved = {k: v.clone() for k, v in t.net.state_dict().items()}
+                with torch.no_grad():
+                    for p in t.net.parameters():
+                        p.add_(1.0)
+                t.revert_to_best(0.0)
+                for k, v in t.net.state_dict().items():
+                    self.assertTrue(torch.equal(v, saved[k]), k)
+            finally:
+                t.close()
+
     def test_training_smoke(self):
         from quoridor.ml.train import main
         with tempfile.TemporaryDirectory() as d:

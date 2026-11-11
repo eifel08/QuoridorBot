@@ -241,6 +241,7 @@ python -m quoridor.ml.evaluate --model runs/exp1/best.pt --games 200
 | `--warmup-games` / `--warmup-steps` | 1000 / 4000 | imitation warm-up size |
 | `--heuristic-mix` | 0.5 | MCTS value = (1 − mix) × network + mix × path heuristic (0 = network only) |
 | `--lr` / `--rl-lr` | 1e-3 / 2e-4 | learning rate for the warm-up / for the RL phase |
+| `--revert-drop` | 0.25 | reload `best.pt` if an evaluation drops this far below the best (0 = off) |
 | `--channels` / `--blocks` | 64 / 6 | network size |
 | `--opponent-depth` | 4 | which alpha-beta depth to train against and evaluate on |
 | `--max-hours` | none | save and stop cleanly after this long (resume later) |

@@ -77,6 +77,7 @@ class TrainConfig:
     confirm_games: int = 200
     confirm_seed: int = 777
     stop_at_target: bool = True
+    revert_drop: float = 0.25    # reload best.pt if an eval falls this far below the best (0 = off)
     # infrastructure
     workers: int = 0          # 0 = all CPU cores
     device: str = "auto"      # "auto" | "cuda" | "cpu"
@@ -310,11 +311,24 @@ class Trainer:
                     self.best_win_rate = r["win_rate"]
                     self.save("best.pt", eval=r)
                     self.say(f"  new best -> {self.out / 'best.pt'}")
+                elif c.revert_drop and r["win_rate"] < self.best_win_rate - c.revert_drop:
+                    self.revert_to_best(r["win_rate"])
                 if r["win_rate"] >= c.target_win_rate:
                     if self.confirm(r):
                         return "target_reached"
         self.say("finished all iterations")
         return "iterations_done"
+
+    def revert_to_best(self, win_rate: float) -> None:
+        """Training collapsed: continue from the best weights (keeps the replay buffer)."""
+        ckpt = torch.load(self.out / "best.pt", map_location=self.device, weights_only=False)
+        self.net.load_state_dict(ckpt["model_state"])
+        self.opt.load_state_dict(ckpt["optimizer"])
+        for group in self.opt.param_groups:
+            group["lr"] = self.cfg.rl_lr
+        self.log("revert", win_rate=win_rate, best_win_rate=self.best_win_rate)
+        self.say(f"  win rate {win_rate:.0%} is far below the best {self.best_win_rate:.0%}: "
+                 f"reloaded best.pt and continuing")
 
     def confirm(self, first: dict) -> bool:
         c = self.cfg

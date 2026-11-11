@@ -64,7 +64,8 @@ class TrainConfig:
     games_per_iter: int = 48
     train_steps: int = 300
     batch_size: int = 256
-    lr: float = 1e-3
+    lr: float = 1e-3             # warm-up (imitation) learning rate
+    rl_lr: float = 2e-4          # learning rate once RL starts (lower = more stable)
     weight_decay: float = 1e-4
     buffer_size: int = 250_000
     # evaluation + stopping
@@ -280,6 +281,8 @@ class Trainer:
                  f"vs Depth-{c.opponent_depth} bot")
         if not self.warmed_up:
             self.warmup()
+        for group in self.opt.param_groups:
+            group["lr"] = c.rl_lr
         while self.iteration < c.iterations:
             if c.max_hours is not None and time.time() - self.start_time > c.max_hours * 3600:
                 self.say("time budget reached: saving and stopping (run again with the same --out to resume)")

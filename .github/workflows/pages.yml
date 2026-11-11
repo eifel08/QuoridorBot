@@ -27,7 +27,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - run: pip install -r requirements.txt
+      - run: pip install -r requirements.txt numpy   # torch-free ML tests run; the rest skip without torch
       - run: python -m unittest -v
 
   deploy:

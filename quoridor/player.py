@@ -9,9 +9,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
 
-from .board import Board
 from .moves import Move, Orientation, PawnMove, WallMove
 from .renderer import render_board
+from .state import BoardState
 
 HELP_TEXT = """\
 Commands:
@@ -40,8 +40,19 @@ class Player(ABC):
         self.index = index
 
     @abstractmethod
-    def get_move(self, board_state: Board) -> Move:
-        """Return the move to play given a (copy of the) current board state."""
+    def get_move(self, board_state: BoardState) -> Move:
+        """Return the move to play.
+
+        ``board_state`` is an immutable, complete snapshot of the position
+        (pawns, walls, walls left, legal moves, ...), so implementations do
+        not need to remember anything between turns.
+        """
+
+    def observe(self, board_state: BoardState) -> None:
+        """Called for every player after each move with the new position.
+
+        Optional hook (e.g. for pondering or logging); the default does nothing.
+        """
 
     def notify_invalid_move(self, move: Move, reason: str) -> None:
         """Called by the engine when the returned move was illegal."""
@@ -99,7 +110,10 @@ def _parse_ints(values: list[str]) -> tuple[int, int]:
 
 
 class HumanPlayer(Player):
-    """A player controlled by a person typing commands in the terminal."""
+    """A player controlled by a person typing commands in the terminal.
+
+    (The GUI equivalent is :class:`quoridor.gui.GuiHumanPlayer`.)
+    """
 
     def __init__(
         self,
@@ -111,7 +125,7 @@ class HumanPlayer(Player):
         self._input = input_func
         self._output = output_func
 
-    def get_move(self, board_state: Board) -> Move:
+    def get_move(self, board_state: BoardState) -> Move:
         while True:
             try:
                 raw = self._input(f"{self.name} > ")
@@ -127,7 +141,7 @@ class HumanPlayer(Player):
             elif kind == "quit":
                 raise QuitGame()
             elif kind == "moves":
-                legal = board_state.valid_pawn_moves(self.index)
+                legal = board_state.valid_pawn_moves
                 self._output(render_board(board_state, frozenset(legal)))
                 self._output("  Legal pawn moves: " + ", ".join(f"m {r} {c}" for r, c in legal))
             else:

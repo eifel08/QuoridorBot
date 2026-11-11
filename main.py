@@ -1,25 +1,32 @@
-"""Entry point: Human vs. Human Quoridor in the terminal."""
+"""Entry point for Quoridor.
 
-from quoridor import Game, HumanPlayer
-from quoridor.player import HELP_TEXT
+    python3 main.py          # graphical version (pygame)
+    python3 main.py --cli    # terminal version
+"""
+
+import argparse
+import sys
 
 
 def main() -> None:
-    print("=== Quoridor ===")
-    print("Player 1 [1] starts at the bottom (row 8) and must reach row 0.")
-    print("Player 2 [2] starts at the top (row 0) and must reach row 8.\n")
-    print(HELP_TEXT)
-    try:
-        name1 = input("\nName for Player 1 (blank = 'Player 1'): ").strip() or "Player 1"
-        name2 = input("Name for Player 2 (blank = 'Player 2'): ").strip() or "Player 2"
-    except (EOFError, KeyboardInterrupt):
-        print()
+    parser = argparse.ArgumentParser(description="Quoridor: Human vs. Human")
+    parser.add_argument("--cli", action="store_true", help="play in the terminal instead of the GUI")
+    parser.add_argument("--p1", default="Player 1", help="name of Player 1 (GUI)")
+    parser.add_argument("--p2", default="Player 2", help="name of Player 2 (GUI)")
+    args = parser.parse_args()
+
+    if args.cli:
+        from quoridor.cli import run_cli
+
+        run_cli()
         return
-    game = Game(HumanPlayer(name1), HumanPlayer(name2))
+
     try:
-        game.run()
-    except KeyboardInterrupt:
-        print("\nGame aborted.")
+        from quoridor.gui import run_gui
+    except ImportError as exc:
+        sys.exit(f"Could not start the GUI ({exc}).\nInstall it with: pip install -r requirements.txt\n"
+                 "or play in the terminal with: python3 main.py --cli")
+    run_gui(args.p1, args.p2)
 
 
 if __name__ == "__main__":

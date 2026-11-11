@@ -126,7 +126,7 @@ class TestGame(unittest.TestCase):
         p1 = ScriptedPlayer("A", [PawnMove(0, 0)] + [PawnMove(r, 4) for r in range(7, -1, -1)])
         # B shuffles along the top row while A walks straight up.
         p2 = ScriptedPlayer("B", [PawnMove(0, c) for c in (3, 2, 1, 0, 1, 2, 3, 2)])
-        game = Game(p1, p2, output_func=lambda s: None, show_board=False)
+        game = Game(p1, p2)
         winner = game.run()
         self.assertEqual(winner, 0)
         self.assertEqual(p1.rejected, [PawnMove(0, 0)])

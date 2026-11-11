@@ -1,22 +1,57 @@
 # QuoridorBot
 
-A 2-player [Quoridor](https://en.wikipedia.org/wiki/Quoridor) game emulator in Python.
-Phase 1: the core rules engine and a Human vs. Human command-line interface.
-A `BotPlayer` will be added later behind the same `Player` interface.
+A 2-player [Quoridor](https://en.wikipedia.org/wiki/Quoridor) game emulator in Python,
+with a pygame GUI and a terminal (CLI) front-end. Human vs. Human for now; a `BotPlayer`
+will plug into the same `Player` interface later.
+
+![GUI screenshot](docs/screenshot.png)
 
 ## Running
 
-Requires Python 3.9+ and no third-party packages.
+Requires Python 3.9+.
+
+```bash
+pip install -r requirements.txt
+```
+
+Launch the GUI (default):
 
 ```bash
 python3 main.py
 ```
 
-Run the tests:
+Optional player names:
+
+```bash
+python3 main.py --p1 Alice --p2 Bob
+```
+
+Terminal version (no dependencies):
+
+```bash
+python3 main.py --cli
+```
+
+Run the tests (GUI tests run headless and are skipped if pygame is missing):
 
 ```bash
 python3 -m unittest -v
 ```
+
+## GUI controls
+
+- **Goal rows** are tinted: the top row (row 0) in red is Player 1's goal, the bottom row
+  (row 8) in blue is Player 2's goal. The active player's pawn pulses and their card is outlined.
+- **Move the pawn**: click your pawn to show grey dots on every legal destination (jumps
+  included), then click one. You can also click a legal square directly, or drag your pawn
+  onto it. An illegal drop slides the pawn back.
+- **Place a wall**: drag one from your reserve (your card in the side panel) onto the board.
+  A semi-transparent preview snaps to the nearest groove:
+  - over a **horizontal** groove the wall covers the hovered square and the one **to its left**;
+  - over a **vertical** groove it covers the hovered square and the one **below**;
+  - if that spot is illegal, the preview tries the spot shifted by one square; if both are
+    illegal the preview turns red and dropping sends the wall back with the reason.
+- **Right-click / Esc** cancels a drag. **R** or the *New game* button restarts.
 
 ## Rules implemented
 
@@ -31,7 +66,7 @@ python3 -m unittest -v
   overlap another wall, or cross another wall at its center.
 - A wall may not cut off **either** player from their goal row (checked with BFS).
 
-## Input format
+## CLI input format
 
 Coordinates are `row col`, both 0-based; row 0 is the top of the board.
 
@@ -60,19 +95,45 @@ Invalid input or illegal moves are rejected with an explanation and you are aske
 ## Code layout
 
 ```
-main.py              CLI entry point (Human vs. Human)
+main.py                CLI/GUI launcher
+requirements.txt       pygame (GUI only)
 quoridor/
-  moves.py           PawnMove / WallMove / Orientation value types
-  board.py           Board state, movement + jump rules, wall validation, BFS
-  player.py          Player (abstract base), HumanPlayer, command parser
-  game.py            Game engine: turn loop, validation, win detection
-  renderer.py        ASCII board rendering
-tests/               unittest suite
+  moves.py             PawnMove / WallMove / Orientation value types
+  state.py             BoardState: immutable, serializable snapshot given to players
+  board.py             Mutable rules engine: movement/jumps, wall validation, BFS
+  player.py            Player (abstract base), CLI HumanPlayer, command parser
+  game.py              Game engine + GameObserver hooks for views
+  renderer.py, cli.py  ASCII rendering and terminal front-end
+  gui/
+    layout.py          Pure pixel geometry (squares, grooves, wall snapping)
+    app.py             QuoridorGUI: pygame drawing, mouse input, animations
+    anim.py, theme.py  Tweens and colors
+    player.py          GuiHumanPlayer
+tests/                 unittest suite
 ```
 
-### Adding a bot
+### State vs. rendering
 
-Subclass `Player` and implement `get_move(board_state) -> Move`. The engine passes a
-copy of the `Board`; `self.index` (0 or 1) tells the player which pawn it controls.
-Helpers such as `board.valid_pawn_moves(i)`, `board.is_valid_wall(i, wall)` and
-`board.shortest_path_length(i)` are available for search/evaluation.
+The engine owns the only mutable `Board`. Each turn it builds a frozen `BoardState` and
+hands it to the player (`get_move(board_state)`) and to observers such as the GUI. Views only
+read snapshots, so drawing can never change the game, and coordinates are never flipped:
+row 0 is always the top row for every player.
+
+### Writing a bot
+
+Subclass `Player` and implement `get_move(board_state) -> Move`. The `BoardState` holds
+everything needed, so the bot doesn't have to remember anything between turns:
+
+| Field / method | Content |
+|---|---|
+| `current_player`, `opponent` | Your index (0 or 1) and the other player's |
+| `pawns`, `goal_rows`, `walls_left` | Per-player tuples |
+| `walls` | `(row, col, Orientation)` for every placed wall |
+| `valid_pawn_moves`, `valid_walls` | All legal moves for the player to move |
+| `shortest_paths` | BFS distance of each player to their goal |
+| `wall_matrix(o)`, `pawn_matrix(p)`, `to_planes()` | 8x8 / 9x9 0-1 grids for ML models |
+| `to_dict()`, `to_json()`, `from_dict()` | Serialization |
+| `to_board()` | A mutable `Board` copy for search (`apply_move`, `wall_error`, ...) |
+
+`Player.observe(state)` is also called after every move if a bot wants to think on the
+opponent's turn.

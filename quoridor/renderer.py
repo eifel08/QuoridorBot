@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+from typing import Union
+
 from .board import Board
 from .moves import Orientation
+from .state import BoardState
+
+BoardLike = Union[Board, BoardState]
 
 PAWN_SYMBOLS = ("1", "2")
 WALL_CHAR = "#"
 
 
-def render_board(board: Board, highlight: frozenset = frozenset()) -> str:
+def render_board(board: BoardLike, highlight: frozenset = frozenset()) -> str:
     """Return a multi-line ASCII picture of the board.
 
     ``highlight`` is an optional set of squares to mark with ``*``
@@ -56,9 +61,9 @@ def render_board(board: Board, highlight: frozenset = frozenset()) -> str:
     return "\n".join(lines)
 
 
-def render_status(board: Board, names: tuple[str, str]) -> str:
+def render_status(board: BoardLike, names: tuple[str, str]) -> str:
     parts = []
     for p in (0, 1):
-        goal = board.goal_row(p)
+        goal = board.goal_rows[p]
         parts.append(f"[{PAWN_SYMBOLS[p]}] {names[p]}: {board.walls_left[p]} walls left (goal: row {goal})")
     return "\n".join(parts)

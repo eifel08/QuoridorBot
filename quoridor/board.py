@@ -6,6 +6,7 @@ from collections import deque
 from typing import Iterable, Optional
 
 from .moves import Move, Orientation, PawnMove, WallMove
+from .state import BoardState
 
 BOARD_SIZE = 9
 WALLS_PER_PLAYER = 10
@@ -49,6 +50,10 @@ class Board:
     # ------------------------------------------------------------------ #
     def in_bounds(self, row: int, col: int) -> bool:
         return 0 <= row < self.size and 0 <= col < self.size
+
+    @property
+    def goal_rows(self) -> tuple[int, int]:
+        return self.GOAL_ROWS
 
     def goal_row(self, player: int) -> int:
         return self.GOAL_ROWS[player]
@@ -144,6 +149,19 @@ class Board:
     def is_valid_wall(self, player: int, wall: Wall) -> bool:
         return self.wall_error(player, wall) is None
 
+    def valid_walls(self, player: int) -> list[Wall]:
+        """Every legal wall placement for ``player`` (empty if none left)."""
+        if self.walls_left[player] <= 0:
+            return []
+        n = self.size - 1
+        return [
+            (r, c, o)
+            for o in (Orientation.HORIZONTAL, Orientation.VERTICAL)
+            for r in range(n)
+            for c in range(n)
+            if self.wall_error(player, (r, c, o)) is None
+        ]
+
     # ------------------------------------------------------------------ #
     # Pathfinding
     # ------------------------------------------------------------------ #
@@ -173,6 +191,26 @@ class Board:
 
     def has_path(self, player: int, walls: Optional[Iterable[Wall]] = None) -> bool:
         return self.shortest_path_length(player, walls) is not None
+
+    # ------------------------------------------------------------------ #
+    # Snapshots
+    # ------------------------------------------------------------------ #
+    def snapshot(self, current_player: int, move_number: int = 0, winner: Optional[int] = None) -> BoardState:
+        """Immutable :class:`BoardState` of this position (nothing is shared)."""
+        over = winner is not None
+        return BoardState(
+            size=self.size,
+            current_player=current_player,
+            pawns=(self.pawns[0], self.pawns[1]),
+            goal_rows=self.goal_rows,
+            walls=tuple(sorted(self.walls, key=lambda w: (w[2].value, w[0], w[1]))),
+            walls_left=(self.walls_left[0], self.walls_left[1]),
+            valid_pawn_moves=() if over else tuple(self.valid_pawn_moves(current_player)),
+            valid_walls=() if over else tuple(self.valid_walls(current_player)),
+            shortest_paths=(self.shortest_path_length(0), self.shortest_path_length(1)),
+            move_number=move_number,
+            winner=winner,
+        )
 
     # ------------------------------------------------------------------ #
     # Applying moves

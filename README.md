@@ -2,8 +2,8 @@
 
 A 2-player [Quoridor](https://en.wikipedia.org/wiki/Quoridor) game emulator in Python, with
 three front-ends: a **browser version** (works from a plain link, also on phones), a pygame
-desktop GUI and a terminal CLI. Human vs. Human for now; a `BotPlayer` will plug into the same
-`Player` interface later.
+desktop GUI and a terminal CLI. Play **Human vs Human** on one device, or **Human vs Bot** against
+an alpha-beta search bot with an adjustable search depth (1-30).
 
 ![GUI screenshot](docs/screenshot.png)
 
@@ -36,6 +36,85 @@ and a console API (`Quoridor.state()` returns the same dict as `BoardState.to_di
 3. Every push to `main` then runs the tests and publishes `web/` via
    `.github/workflows/pages.yml` (it can also be started by hand from the *Actions* tab).
 
+## Game modes
+
+Every front-end lets you pick the mode before a game:
+
+| | Browser | Desktop window | Terminal |
+|---|---|---|---|
+| Choose the mode | *Human vs Human / Human vs Bot* switch at the top | start menu | prompt at start |
+| Search depth (1-30) | slider | slider (or arrow keys) | prompt |
+| Think-time cap | dropdown (1 s ... no limit) | buttons | prompt |
+| Play Red (first) or Blue | dropdown | buttons | prompt |
+
+- **Human vs Human**: two people take turns on the same computer.
+- **Human vs Bot**: you play against the alpha-beta bot. After each bot move, the depth it reached,
+  the number of positions it searched, the time it took and its score are shown (under the board in
+  the browser, in the side panel on the desktop, after the move in the terminal).
+  In the browser, *Undo* takes back your move and the bot's reply.
+
+Shortcuts: `python3 main.py --mode bot --depth 6 --time-limit 3 --play-as 2` skips the desktop menu
+(add `--cli` for the terminal). In the browser, `?mode=bot&depth=6` preselects the mode and depth.
+
+## The alpha-beta bot
+
+Code: `quoridor/bots/alphabeta.py` (`AlphaBetaBot`), ported line by line to `web/bot.js` for the
+browser. A test checks that both versions pick the same move, with the same score and the same
+number of searched positions.
+
+**Heuristic.** For a position, with both step counts measured as BFS shortest paths (pawns ignored):
+
+```
+Score = (steps the bot needs to reach its goal) - (steps the opponent needs to reach its goal)
+```
+
+The bot wants the Score as **low** as possible: few steps for itself, many for the opponent. The
+search is written as *negamax*: each position is scored for the side to move as `-Score`
+(opponent steps - own steps) and both sides maximise. This is the same minimax with alpha-beta
+pruning, just with one function instead of separate min and max functions. A win found during the
+search scores +/- 1,000,000; faster wins score slightly higher.
+
+**Search.**
+- *Iterative deepening*: it searches depth 1, then 2, ... up to the chosen depth. If the think-time
+  cap runs out, it plays the best move from the deepest depth it fully finished. The depth slider
+  is the maximum; the cap keeps deep settings responsive. Pick "no limit" to always search the
+  full depth.
+- *Move ordering*: the best move from the previous depth (stored in a transposition table) is tried
+  first, then pawn steps that shorten the bot's own path, then walls by how much they help.
+  Good ordering lets alpha-beta skip more of the tree.
+- *Wall pruning*: only walls that cut one of the opponent's current shortest paths **and** improve
+  the score are considered (~5-20 instead of ~130). This is what makes depths beyond 3 practical.
+  The trade-off is that walls placed purely to prepare a later trap are not seen.
+- *Stateless*: `get_move(board_state)` copies the read-only `BoardState` into a scratch board,
+  searches, and throws it away. The bot keeps no memory between turns.
+
+**Speed vs depth** (one mid-game position, no time cap; the browser is ~6x faster than Python):
+
+| Depth | Positions | Python | Browser (JS) |
+|---|---|---|---|
+| 4 | ~100 | 0.02 s | <0.01 s |
+| 6 | ~840 | 0.2 s | 0.05 s |
+| 8 | ~7,400 | 1.7 s | 0.35 s |
+| 10 | ~63,000 | 16 s | 2.4 s |
+| 12+ | grows ~8x per 2 plies | use the time cap | use the time cap |
+
+Depth 1 only looks at its own next move, so it walks straight and never defends. Depths 4-8 play
+sensibly and answer fast. Above ~10, the time cap decides how deep it actually gets. Even depths
+tend to be more cautious than odd ones, because an even depth always ends the search on the
+opponent's reply.
+
+Use the bot from code:
+
+```python
+from quoridor import Game
+from quoridor.bots import AlphaBetaBot, search
+
+game = Game(AlphaBetaBot("Fast", depth=2), AlphaBetaBot("Deep", depth=6, time_limit=2))
+winner = game.run()
+
+move, info = search(game.state, depth=6, time_limit=None)  # one-off analysis
+```
+
 ## Desktop and terminal versions
 
 Requires Python 3.9+. Install the dependency (only needed for the desktop GUI):
@@ -52,9 +131,10 @@ two can't be installed side by side.
 
 | Command | Version |
 |---|---|
-| `python3 main.py` | pygame desktop window |
+| `python3 main.py` | pygame desktop window (starts with the mode menu) |
 | `python3 main.py --p1 Alice --p2 Bob` | desktop window with names |
-| `python3 main.py --cli` | terminal (no dependencies) |
+| `python3 main.py --cli` | terminal (no dependencies; asks for the mode) |
+| `python3 main.py --mode bot --depth 6` | desktop window, straight into Human vs Bot |
 | `python3 main.py --web` | browser version on localhost |
 
 Run the tests (GUI tests run headless and are skipped without pygame; the web engine test
@@ -127,19 +207,22 @@ requirements.txt       pygame-ce (desktop GUI only)
 web/                   Browser version (static site, deployed to GitHub Pages)
   index.html, style.css, app.js   UI: SVG board, drag-and-drop, animations
   engine.js            JS port of the rules (checked against Python by tests)
+  bot.js, bot-worker.js  JS port of the alpha-beta bot, run in a Web Worker
 .github/workflows/     Tests + GitHub Pages deployment
 quoridor/
   moves.py             PawnMove / WallMove / Orientation value types
   state.py             BoardState: immutable, serializable snapshot given to players
   board.py             Mutable rules engine: movement/jumps, wall validation, BFS
   player.py            Player (abstract base), CLI HumanPlayer, command parser
+  bots/alphabeta.py    AlphaBetaBot: negamax alpha-beta search, heuristic, iterative deepening
   game.py              Game engine + GameObserver hooks for views
   renderer.py, cli.py  ASCII rendering and terminal front-end
   gui/
     layout.py          Pure pixel geometry (squares, grooves, wall snapping)
     app.py             QuoridorGUI: pygame drawing, mouse input, animations
     anim.py, theme.py  Tweens and colors
-    player.py          GuiHumanPlayer
+    menu.py            Start menu: mode, depth slider, think time, side
+    player.py          GuiHumanPlayer, GuiBotPlayer (runs a bot in a background thread)
 tests/                 unittest suite
 ```
 

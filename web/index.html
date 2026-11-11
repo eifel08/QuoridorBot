@@ -18,6 +18,37 @@
       </div>
     </header>
 
+    <section class="setup" aria-label="Game mode">
+      <div class="segmented" role="radiogroup" aria-label="Game mode">
+        <button type="button" role="radio" data-mode="hvh" aria-checked="true">Human vs Human</button>
+        <button type="button" role="radio" data-mode="hvb" aria-checked="false">Human vs Bot</button>
+      </div>
+      <div class="bot-options" id="bot-options" hidden>
+        <label class="depth">
+          <span>Search depth <output id="depth-value">4</output></span>
+          <input type="range" id="depth" min="1" max="30" step="1" value="4">
+        </label>
+        <label class="field">
+          <span>Think time</span>
+          <select id="time-limit">
+            <option value="1000">1 s</option>
+            <option value="3000">3 s</option>
+            <option value="5000" selected>5 s</option>
+            <option value="10000">10 s</option>
+            <option value="30000">30 s</option>
+            <option value="0">No limit</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>You play</span>
+          <select id="human-side">
+            <option value="0" selected>Red (moves first)</option>
+            <option value="1">Blue</option>
+          </select>
+        </label>
+      </div>
+    </section>
+
     <section class="players" aria-label="Players">
       <div class="chip" id="chip0" data-player="0">
         <span class="swatch"></span>
@@ -48,6 +79,7 @@
     </div>
 
     <p class="message" id="message" aria-live="assertive"></p>
+    <p class="bot-info" id="bot-info"></p>
 
     <details class="help">
       <summary>How to play</summary>
@@ -56,7 +88,8 @@
         <li><b>Move:</b> tap your pawn to see grey dots on the legal squares, then tap one. You can also tap a legal square directly or drag your pawn onto it. If the other pawn is in the way you can jump over it, or diagonally past it when a wall or the edge blocks the jump.</li>
         <li><b>Wall:</b> drag a wall from your reserve onto a groove. Over a horizontal groove it covers the square under your finger and the one to its left; over a vertical groove, that square and the one below. Green means legal, red means not.</li>
         <li>Walls can't overlap or cross, and can't completely cut either player off from their goal.</li>
-        <li>Esc or right-click cancels a drag. Ctrl+Z undoes.</li>
+        <li>Esc or right-click cancels a drag. Ctrl+Z undoes (against the bot it goes back to your previous turn).</li>
+        <li><b>Human vs Bot:</b> the bot uses alpha-beta search. Its score is (bot's steps to goal) − (your steps to goal), and it tries to make that as low as possible. The depth slider sets how many moves ahead it looks (1–30). Deeper is stronger but slower. The think-time cap stops the search early and plays the best move from the deepest level it finished, shown under the board.</li>
       </ul>
     </details>
   </main>

@@ -30,14 +30,25 @@ def serve_web(port: int, open_browser: bool = True) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Quoridor: Human vs. Human")
+    parser = argparse.ArgumentParser(description="Quoridor: Human vs Human or Human vs Bot")
     parser.add_argument("--cli", action="store_true", help="play in the terminal instead of the GUI")
     parser.add_argument("--web", action="store_true", help="serve the browser version locally")
     parser.add_argument("--port", type=int, default=8000, help="port for --web (default 8000)")
     parser.add_argument("--no-browser", action="store_true", help="with --web, don't open a browser tab")
+    parser.add_argument("--mode", choices=["human", "bot"],
+                        help="skip the menu: 'human' = Human vs Human, 'bot' = Human vs Bot")
+    parser.add_argument("--depth", type=int, default=4, help="bot search depth 1-30 (default 4)")
+    parser.add_argument("--time-limit", type=float, default=5.0,
+                        help="bot think time per move in seconds, 0 = no limit (default 5)")
+    parser.add_argument("--play-as", type=int, choices=[1, 2], default=1,
+                        help="against the bot: play as Player 1 (moves first) or 2")
     parser.add_argument("--p1", default="Player 1", help="name of Player 1 (GUI)")
     parser.add_argument("--p2", default="Player 2", help="name of Player 2 (GUI)")
     args = parser.parse_args()
+    if not 1 <= args.depth <= 30:
+        parser.error("--depth must be between 1 and 30")
+    mode = {"human": "hvh", "bot": "hvb", None: None}[args.mode]
+    time_limit = args.time_limit or None
 
     if args.web:
         serve_web(args.port, open_browser=not args.no_browser)
@@ -46,7 +57,7 @@ def main() -> None:
     if args.cli:
         from quoridor.cli import run_cli
 
-        run_cli()
+        run_cli(mode, args.depth, time_limit, args.play_as - 1)
         return
 
     try:
@@ -54,7 +65,10 @@ def main() -> None:
     except ImportError as exc:
         sys.exit(f"Could not start the GUI ({exc}).\nInstall it with: pip install -r requirements.txt\n"
                  "or play in the terminal with: python3 main.py --cli")
-    run_gui(args.p1, args.p2)
+    from quoridor.gui import MatchSettings
+
+    settings = MatchSettings(mode or "hvh", args.depth, time_limit, args.play_as - 1)
+    run_gui(args.p1, args.p2, settings=settings, show_menu=mode is None)
 
 
 if __name__ == "__main__":

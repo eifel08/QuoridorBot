@@ -1,8 +1,7 @@
-name: Test and deploy web version
+name: Tests (+ deploy web version from main)
 
 on:
   push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -33,7 +32,7 @@ jobs:
 
   deploy:
     needs: test
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

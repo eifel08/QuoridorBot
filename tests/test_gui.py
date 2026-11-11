@@ -133,3 +133,25 @@ class TestGuiInteraction(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(pygame is None, "pygame not installed")
+class TestModeSetup(unittest.TestCase):
+    def test_build_players(self):
+        from quoridor.gui import MatchSettings, QuoridorGUI, build_players
+        from quoridor.gui.player import GuiBotPlayer, GuiHumanPlayer
+        gui = QuoridorGUI()
+        a, b = build_players(MatchSettings("hvh"), gui, ("A", "B"))
+        self.assertIsInstance(a, GuiHumanPlayer)
+        self.assertIsInstance(b, GuiHumanPlayer)
+        a, b = build_players(MatchSettings("hvb", depth=9, time_limit=2.0, human_side=1), gui, ("A", "B"))
+        self.assertIsInstance(a, GuiBotPlayer)
+        self.assertEqual((a.bot.depth, a.bot.time_limit), (9, 2.0))
+        self.assertIsInstance(b, GuiHumanPlayer)
+
+    def test_menu_slider_range(self):
+        from quoridor.gui import QuoridorGUI
+        from quoridor.gui.menu import Menu
+        menu = Menu(QuoridorGUI())
+        self.assertEqual(menu._depth_at(menu.slider.left - 50), 1)
+        self.assertEqual(menu._depth_at(menu.slider.right + 50), 30)

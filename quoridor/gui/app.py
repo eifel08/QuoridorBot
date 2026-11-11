@@ -54,6 +54,8 @@ class QuoridorGUI(GameObserver):
         self.message_until = 0
         self.human_turn = False
         self.restart_requested = False
+        self.bot_thinking = False
+        self.bot_info: Optional[dict] = None
         self.quit_requested = False
         self.mouse: tuple[int, int] = (0, 0)
         self._origin: Optional[tuple[float, ...]] = None  # pixel start of the next move animation
@@ -65,6 +67,7 @@ class QuoridorGUI(GameObserver):
     def on_game_start(self, game: Game, state: BoardState) -> None:
         self.names = game.names
         self.state = state
+        self.bot_info = None
         self.anims.clear()
         self.message = ""
         self._frame()
@@ -114,6 +117,17 @@ class QuoridorGUI(GameObserver):
     # ================================================================== #
     # Human input
     # ================================================================== #
+    def wait_for_bot(self, state: BoardState, thread) -> None:
+        """Keep the window alive (and closable) until the bot thread finishes."""
+        self.state = state
+        self.human_turn = False
+        self.bot_thinking = True
+        try:
+            while thread.is_alive():
+                self._frame()
+        finally:
+            self.bot_thinking = False
+
     def wait_for_move(self, state: BoardState) -> Move:
         """Run the event loop until the active human picks a legal move."""
         self.state = state
@@ -425,12 +439,23 @@ class QuoridorGUI(GameObserver):
         cx = L.panel_x + L.panel_width / 2
         if st.winner is None:
             cur = st.current_player
-            self._text(f"{self.names[cur]}'s turn", (cx, mid - 82), self.font, T.PAWN_COLORS[cur])
+            if self.bot_thinking:
+                dots = "." * (1 + pygame.time.get_ticks() // 400 % 3)
+                self._text(f"{self.names[cur]} is thinking{dots}", (cx, mid - 82), self.font, T.PAWN_COLORS[cur])
+            else:
+                self._text(f"{self.names[cur]}'s turn", (cx, mid - 82), self.font, T.PAWN_COLORS[cur])
             hints = ("Click or drag your pawn to move",
                      "Drag a wall from your reserve",
                      "Right-click / Esc cancels a drag")
             for i, line in enumerate(hints):
                 self._text(line, (cx, mid - 52 + 20 * i), self.font_small, T.TEXT_DIM)
+        if self.bot_info:
+            info = self.bot_info
+            outcome = (f"forced {info['forced']}" if info.get("forced")
+                       else f"score {info['score']:+d}")
+            self._text(f"Bot: depth {info['depth_reached']}/{info['depth_requested']}, "
+                       f"{info['nodes']:,} pos, {info['seconds']:.2f}s, {outcome}",
+                       (cx, L.button_rect[1] + L.button_rect[3] + 14), self.font_small, T.TEXT_DIM)
         if self.message and pygame.time.get_ticks() < self.message_until:
             self._text(self.message, (cx, mid + 14), self.font_small, T.PREVIEW_BAD, max_width=L.panel_width)
 

@@ -1,6 +1,7 @@
 // Browser UI for Quoridor. Reads immutable snapshots from engine.js and
 // never changes coordinates: row 0 is always drawn at the top.
 import * as E from "./engine.js";
+import { search as botSearch } from "./bot.js";
 
 const NS = "http://www.w3.org/2000/svg";
 
@@ -99,6 +100,68 @@ function resetUi() {
   });
 }
 
+// ---------------------------------------------------------------- bot
+const settings = { mode: "hvh", depth: 4, timeMs: 5000, humanSide: 0 };
+const isBot = (p) => settings.mode === "hvb" && p !== settings.humanSide;
+let worker = null;
+let workerBroken = false;
+let requestId = 0;
+let thinking = false;
+let lastBotInfo = null;
+
+function getWorker() {
+  if (worker || workerBroken) return worker;
+  try {
+    worker = new Worker(new URL("./bot-worker.js", import.meta.url), { type: "module" });
+    worker.onmessage = (evt) => onBotResult(evt.data);
+    worker.onerror = () => {  // e.g. module workers unsupported: fall back to the main thread
+      workerBroken = true;
+      worker = null;
+      if (thinking) { thinking = false; maybeBotTurn(); }
+    };
+  } catch {
+    workerBroken = true;
+    worker = null;
+  }
+  return worker;
+}
+
+function maybeBotTurn() {
+  if (snap.winner !== null || !isBot(snap.current_player) || thinking || animating) return;
+  thinking = true;
+  const id = ++requestId;
+  const msg = { id, snapshot: snap, depth: settings.depth, timeLimitMs: settings.timeMs || null };
+  const w = getWorker();
+  if (w) {
+    w.postMessage(msg);
+  } else {
+    // Let the "thinking" status paint before blocking the main thread.
+    setTimeout(() => onBotResult({ id, ...botSearch(msg.snapshot, msg.depth, msg.timeLimitMs) }), 50);
+  }
+  renderPanel();
+}
+
+function onBotResult({ id, move, info }) {
+  if (id !== requestId || !thinking) return;  // stale answer (new game / undo)
+  thinking = false;
+  lastBotInfo = info;
+  play(move);
+}
+
+function cancelBot() {
+  requestId++;
+  if (thinking && worker) { worker.terminate(); worker = null; }
+  thinking = false;
+}
+
+function describeBotInfo(info) {
+  if (!info) return "";
+  const outcome = info.forced ? ` · sees a forced ${info.forced === "win" ? "win" : "loss"} for itself`
+    : ` · score ${info.score > 0 ? "+" : ""}${info.score} (bot steps − your steps)`;
+  return `Bot searched depth ${info.depth_reached}/${info.depth_requested} · ` +
+    `${info.nodes.toLocaleString()} positions in ${info.seconds.toFixed(2)} s${outcome}`;
+}
+
 function setGame(g) {
   game = g;
   snap = E.snapshot(game);
@@ -106,7 +169,7 @@ function setGame(g) {
 }
 setGame(game);
 
-const names = () => [0, 1].map((p) => $(`name${p}`).value.trim() || `Player ${p + 1}`);
+const names = () => [0, 1].map((p) => (isBot(p) ? "Bot" : $(`name${p}`).value.trim() || `Player ${p + 1}`));
 const $ = (id) => document.getElementById(id);
 
 // ---------------------------------------------------------------- svg helpers
@@ -256,7 +319,12 @@ function renderPanel() {
     chip.querySelector(".walls").textContent = snap.walls_left[p];
   }
   const status = $("status");
-  if (snap.winner !== null) {
+  status.classList.toggle("thinking", thinking);
+  $("bot-info").textContent = settings.mode === "hvb" ? describeBotInfo(lastBotInfo) : "";
+  if (thinking) {
+    status.textContent = "Bot is thinking";
+    status.style.color = COLORS.pawn[snap.current_player];
+  } else if (snap.winner !== null) {
     status.textContent = `${n[snap.winner]} wins!`;
     status.style.color = COLORS.pawn[snap.winner];
   } else {
@@ -341,6 +409,7 @@ async function play(move, origin) {
     await animateRect(node, from, wallRect([move.row, move.col, move.orientation]), 170, easeOutBack);
   }
   render();
+  maybeBotTurn();
 }
 
 function floatingRect() {
@@ -387,7 +456,7 @@ function toSvg(evt) {
 const isValidSquare = (sq) => sq && snap.valid_pawn_moves.some(([r, c]) => r === sq[0] && c === sq[1]);
 
 svg.addEventListener("pointerdown", (evt) => {
-  if (animating || snap.winner !== null) return;
+  if (animating || snap.winner !== null || isBot(snap.current_player)) return;
   if (evt.button === 2) { cancelDrags(); return; }
   if (evt.button !== 0) return;
   const pt = toSvg(evt);
@@ -479,18 +548,27 @@ function cancelDrags() {
 }
 
 function undo() {
-  if (!history.length || animating) return;
-  setGame(history.pop());
+  if (animating) { setTimeout(undo, 60); return; }
+  if (!history.length) return;
+  cancelBot();
+  let g = history.pop();
+  // Against the bot, go back to the human's previous turn.
+  while (isBot(g.current) && history.length) g = history.pop();
+  setGame(g);
   resetUi();
   render();
+  maybeBotTurn();
 }
 
 function newGame() {
-  if (animating) return;
+  if (animating) { setTimeout(newGame, 60); return; }  // let a running animation finish
+  cancelBot();
   history = [];
+  lastBotInfo = null;
   setGame(E.newGame());
   resetUi();
   render();
+  maybeBotTurn();
 }
 
 document.addEventListener("keydown", (evt) => {
@@ -504,22 +582,84 @@ $("again").addEventListener("click", newGame);
 
 // Names: from ?p1=&p2= in the URL, else remembered locally.
 const params = new URLSearchParams(location.search);
-for (const p of [0, 1]) {
-  const input = $(`name${p}`);
+const humanNames = [0, 1].map((p) => {
   let saved = null;
   try { saved = localStorage.getItem(`quoridor.name${p}`); } catch { /* storage unavailable */ }
-  input.value = params.get(`p${p + 1}`) || saved || `Player ${p + 1}`;
+  return params.get(`p${p + 1}`) || saved || `Player ${p + 1}`;
+});
+function applyNameInputs() {
+  for (const p of [0, 1]) {
+    const input = $(`name${p}`);
+    input.disabled = isBot(p);
+    input.value = isBot(p) ? "Bot" : humanNames[p];
+  }
+}
+for (const p of [0, 1]) {
+  const input = $(`name${p}`);
   input.addEventListener("input", () => {
+    humanNames[p] = input.value;
     try { localStorage.setItem(`quoridor.name${p}`, input.value); } catch { /* ignore */ }
     renderPanel();
   });
 }
+
+// ---------------------------------------------------------------- settings
+function loadSettings() {
+  try { Object.assign(settings, JSON.parse(localStorage.getItem("quoridor.settings") || "{}")); } catch { /* ignore */ }
+  if (params.get("mode") === "bot") settings.mode = "hvb";
+  if (params.get("mode") === "human") settings.mode = "hvh";
+  if (params.get("depth")) settings.depth = Number(params.get("depth"));
+  settings.depth = Math.max(1, Math.min(30, Math.round(settings.depth) || 4));
+}
+function saveSettings() {
+  try { localStorage.setItem("quoridor.settings", JSON.stringify(settings)); } catch { /* ignore */ }
+}
+function renderSettings() {
+  for (const b of document.querySelectorAll(".segmented [data-mode]")) {
+    b.setAttribute("aria-checked", String(b.dataset.mode === settings.mode));
+  }
+  $("bot-options").hidden = settings.mode !== "hvb";
+  $("depth").value = settings.depth;
+  $("depth-value").textContent = settings.depth;
+  $("time-limit").value = String(settings.timeMs);
+  $("human-side").value = String(settings.humanSide);
+  applyNameInputs();
+}
+for (const b of document.querySelectorAll(".segmented [data-mode]")) {
+  b.addEventListener("click", () => {
+    if (settings.mode === b.dataset.mode) return;
+    settings.mode = b.dataset.mode;
+    saveSettings();
+    renderSettings();
+    newGame();
+  });
+}
+$("depth").addEventListener("input", () => {
+  settings.depth = Number($("depth").value);
+  $("depth-value").textContent = settings.depth;
+  saveSettings();
+});
+$("time-limit").addEventListener("change", () => {
+  settings.timeMs = Number($("time-limit").value);
+  saveSettings();
+});
+$("human-side").addEventListener("change", () => {
+  settings.humanSide = Number($("human-side").value);
+  saveSettings();
+  renderSettings();
+  newGame();
+});
+loadSettings();
+renderSettings();
 
 // Small API for scripts/bots in the console: Quoridor.state() returns the
 // same dict shape as Python's BoardState.to_dict(); Quoridor.play(move) plays.
 window.Quoridor = {
   state: () => E.snapshot(game),
   play: (move) => play(move),
+  botMove: (depth = settings.depth, timeLimitMs = settings.timeMs || null) => botSearch(E.snapshot(game), depth, timeLimitMs),
+  settings,
 };
 
 render();
+maybeBotTurn();

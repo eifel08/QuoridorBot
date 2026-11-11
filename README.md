@@ -38,11 +38,17 @@ and a console API (`Quoridor.state()` returns the same dict as `BoardState.to_di
 
 ## Desktop and terminal versions
 
-Requires Python 3.9+. Install the dependency (pygame, only needed for the desktop GUI):
+Requires Python 3.9+. Install the dependency (only needed for the desktop GUI):
 
 ```bash
 pip install -r requirements.txt
 ```
+
+This installs [pygame-ce](https://pyga.me/), the community edition of pygame. The code still
+does `import pygame`; pygame-ce is used because it ships prebuilt wheels for new Python
+versions (e.g. 3.14 on Windows), whereas plain `pygame` tries to compile from source there and
+fails. If you previously installed plain `pygame`, run `pip uninstall pygame` first, since the
+two can't be installed side by side.
 
 | Command | Version |
 |---|---|
@@ -117,7 +123,7 @@ Invalid input or illegal moves are rejected with an explanation and you are aske
 
 ```
 main.py                Launcher: desktop GUI, --cli, --web
-requirements.txt       pygame (desktop GUI only)
+requirements.txt       pygame-ce (desktop GUI only)
 web/                   Browser version (static site, deployed to GitHub Pages)
   index.html, style.css, app.js   UI: SVG board, drag-and-drop, animations
   engine.js            JS port of the rules (checked against Python by tests)

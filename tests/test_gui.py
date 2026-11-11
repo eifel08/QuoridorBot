@@ -15,6 +15,7 @@ from quoridor import Board, Orientation, PawnMove, WallMove
 H, V = Orientation.HORIZONTAL, Orientation.VERTICAL
 
 
+@unittest.skipIf(pygame is None, "pygame not installed")
 class TestLayout(unittest.TestCase):
     def setUp(self):
         from quoridor.gui.layout import Layout

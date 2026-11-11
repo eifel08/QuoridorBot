@@ -1,44 +1,64 @@
 # QuoridorBot
 
-A 2-player [Quoridor](https://en.wikipedia.org/wiki/Quoridor) game emulator in Python,
-with a pygame GUI and a terminal (CLI) front-end. Human vs. Human for now; a `BotPlayer`
-will plug into the same `Player` interface later.
+A 2-player [Quoridor](https://en.wikipedia.org/wiki/Quoridor) game emulator in Python, with
+three front-ends: a **browser version** (works from a plain link, also on phones), a pygame
+desktop GUI and a terminal CLI. Human vs. Human for now; a `BotPlayer` will plug into the same
+`Player` interface later.
 
 ![GUI screenshot](docs/screenshot.png)
 
-## Running
+## Play in the browser
 
-Requires Python 3.9+.
+**Online:** once GitHub Pages is on (see below), the game is at
+**https://eifel08.github.io/QuoridorBot/**. Share that link and play on one device (pass and play).
+Names can be preset in the URL: `https://eifel08.github.io/QuoridorBot/?p1=Alice&p2=Bob`.
+
+**Locally** (Python only, nothing to install):
+
+```bash
+python3 main.py --web
+```
+
+That serves the `web/` folder at http://localhost:8000 and opens a browser tab
+(`--port 9000` to change the port, `--no-browser` to skip opening a tab). Any static file
+server works too, e.g. `cd web && python3 -m http.server`.
+
+The web version is plain HTML/CSS/JavaScript in `web/` with no build step and no external
+libraries. `web/engine.js` is a port of the Python rules, and `tests/test_web_engine.py`
+checks that it computes exactly the same legal moves, legal walls and path lengths as the
+Python engine on a few hundred random positions. It also has *Undo*, editable player names,
+and a console API (`Quoridor.state()` returns the same dict as `BoardState.to_dict()`).
+
+### Turning on the GitHub Pages link (one-time)
+
+1. Merge this work into the `main` branch.
+2. On GitHub: **Settings -> Pages -> Build and deployment -> Source: GitHub Actions**.
+3. Every push to `main` then runs the tests and publishes `web/` via
+   `.github/workflows/pages.yml` (it can also be started by hand from the *Actions* tab).
+
+## Desktop and terminal versions
+
+Requires Python 3.9+. Install the dependency (pygame, only needed for the desktop GUI):
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Launch the GUI (default):
+| Command | Version |
+|---|---|
+| `python3 main.py` | pygame desktop window |
+| `python3 main.py --p1 Alice --p2 Bob` | desktop window with names |
+| `python3 main.py --cli` | terminal (no dependencies) |
+| `python3 main.py --web` | browser version on localhost |
 
-```bash
-python3 main.py
-```
-
-Optional player names:
-
-```bash
-python3 main.py --p1 Alice --p2 Bob
-```
-
-Terminal version (no dependencies):
-
-```bash
-python3 main.py --cli
-```
-
-Run the tests (GUI tests run headless and are skipped if pygame is missing):
+Run the tests (GUI tests run headless and are skipped without pygame; the web engine test
+needs Node.js and is skipped without it):
 
 ```bash
 python3 -m unittest -v
 ```
 
-## GUI controls
+## Controls (browser and desktop GUI)
 
 - **Goal rows** are tinted: the top row (row 0) in red is Player 1's goal, the bottom row
   (row 8) in blue is Player 2's goal. The active player's pawn pulses and their card is outlined.
@@ -51,7 +71,8 @@ python3 -m unittest -v
   - over a **vertical** groove it covers the hovered square and the one **below**;
   - if that spot is illegal, the preview tries the spot shifted by one square; if both are
     illegal the preview turns red and dropping sends the wall back with the reason.
-- **Right-click / Esc** cancels a drag. **R** or the *New game* button restarts.
+- **Right-click / Esc** cancels a drag. Desktop: **R** or *New game* restarts.
+  Browser: *New game*, *Undo* (Ctrl+Z); touch works the same as the mouse.
 
 ## Rules implemented
 
@@ -95,8 +116,12 @@ Invalid input or illegal moves are rejected with an explanation and you are aske
 ## Code layout
 
 ```
-main.py                CLI/GUI launcher
-requirements.txt       pygame (GUI only)
+main.py                Launcher: desktop GUI, --cli, --web
+requirements.txt       pygame (desktop GUI only)
+web/                   Browser version (static site, deployed to GitHub Pages)
+  index.html, style.css, app.js   UI: SVG board, drag-and-drop, animations
+  engine.js            JS port of the rules (checked against Python by tests)
+.github/workflows/     Tests + GitHub Pages deployment
 quoridor/
   moves.py             PawnMove / WallMove / Orientation value types
   state.py             BoardState: immutable, serializable snapshot given to players

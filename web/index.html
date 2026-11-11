@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Quoridor</title>
+  <meta name="description" content="Play 2-player Quoridor in the browser: click or drag pawns, drag walls into place.">
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23342620'/%3E%3Ccircle cx='16' cy='22' r='6' fill='%23ff525c'/%3E%3Ccircle cx='16' cy='10' r='6' fill='%233aa0ff'/%3E%3C/svg%3E">
+</head>
+<body>
+  <main class="app">
+    <header class="top">
+      <h1>Quoridor</h1>
+      <div class="controls">
+        <button id="undo" type="button" title="Undo last move (Ctrl+Z)">Undo</button>
+        <button id="new" type="button">New game</button>
+      </div>
+    </header>
+
+    <section class="players" aria-label="Players">
+      <div class="chip" id="chip0" data-player="0">
+        <span class="swatch"></span>
+        <div class="info">
+          <input class="name" id="name0" value="Player 1" maxlength="20" aria-label="Player 1 name">
+          <span class="meta"><b class="walls">10</b> walls<span class="goal"> · goal: top row</span></span>
+        </div>
+      </div>
+      <div class="chip" id="chip1" data-player="1">
+        <span class="swatch"></span>
+        <div class="info">
+          <input class="name" id="name1" value="Player 2" maxlength="20" aria-label="Player 2 name">
+          <span class="meta"><b class="walls">10</b> walls<span class="goal"> · goal: bottom row</span></span>
+        </div>
+      </div>
+    </section>
+
+    <p class="status" id="status" aria-live="polite"></p>
+
+    <div class="board-wrap">
+      <svg id="board" role="img" aria-label="Quoridor board"></svg>
+      <div class="overlay" id="overlay" hidden>
+        <div class="card">
+          <p id="winner-text"></p>
+          <button id="again" type="button">Play again</button>
+        </div>
+      </div>
+    </div>
+
+    <p class="message" id="message" aria-live="assertive"></p>
+
+    <details class="help">
+      <summary>How to play</summary>
+      <ul>
+        <li>Be the first to get your pawn to the tinted row on the far side: red goes to the top, blue to the bottom.</li>
+        <li><b>Move:</b> tap your pawn to see grey dots on the legal squares, then tap one. You can also tap a legal square directly or drag your pawn onto it. If the other pawn is in the way you can jump over it, or diagonally past it when a wall or the edge blocks the jump.</li>
+        <li><b>Wall:</b> drag a wall from your reserve onto a groove. Over a horizontal groove it covers the square under your finger and the one to its left; over a vertical groove, that square and the one below. Green means legal, red means not.</li>
+        <li>Walls can't overlap or cross, and can't completely cut either player off from their goal.</li>
+        <li>Esc or right-click cancels a drag. Ctrl+Z undoes.</li>
+      </ul>
+    </details>
+  </main>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

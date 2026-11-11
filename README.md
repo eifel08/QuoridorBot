@@ -147,8 +147,8 @@ games against the Depth-4 alpha-beta bot**. Training stops by itself and saves
 
 - **Training output**, one line per iteration, plus an evaluation every few iterations:
   ```
-  [ 1.42h it   36] train: agent won 31% of 48 games, loss p=1.874 v=0.612, 205s
-  [ 1.42h it   36] EVAL vs Depth-4: win rate 38.0% (38/100, 95% CI low 28.9%, red 40% / blue 36%)
+  [ 0.19h it   18] train: agent won 17% of 24 games, loss p=0.992 v=0.142, 77s
+  [ 0.21h it   18] EVAL vs Depth-4: win rate 65.0% (26/40, 95% CI low 49.5%, red 70% / blue 60%)
   ```
 - **TensorBoard** (started in the notebook): `eval/win_rate` is the number that has to reach 0.95.
   Also useful: `train/train_win_rate`, `train/policy_loss`, `train/value_loss`.
@@ -213,6 +213,28 @@ So the ML agent has to learn the Depth-4 bot's specific blind spots: it only con
 immediately lengthen the opponent's path, and it doesn't look past 4 moves. That is learnable, but
 it takes many games. Expect hours to days of compute rather than minutes, and there is no
 guarantee a given run reaches 95%. `best.pt` always holds the strongest model so far.
+
+**What a short local test run did** (4 CPU cores, no GPU, about 1.3 hours, 500 warm-up games,
+24 games per iteration, 48 simulations per move):
+
+| Stage | Win rate vs Depth 4 |
+|---|---|
+| imitation warm-up only, plain MCTS, first version | 0% (0/40) |
+| after adding the wall-gain input planes and the 50/50 heuristic mix | 12.5% (iteration 2) |
+| RL, learning rate 1e-3 | rose to 42.5% (iteration 12), then fell to 5% (iteration 20) |
+| RL from the best checkpoint with `--rl-lr 2e-4` | 30-65% per 40-game evaluation |
+| that best checkpoint, re-tested on 100 fresh openings | **49%** (95% CI lower bound 39%) |
+
+Lessons that are now built into the defaults:
+- The **wall-gain planes** and **heuristic mix** were what made the agent competitive at all.
+- A lower **RL learning rate** plus **`--revert-drop`** fight the collapses.
+- 40-game evaluations swing by ±15 points, and the best of many such evaluations overstates the
+  true strength (65% measured, 49% on re-test). This is why the default evaluation uses 100
+  games and why the 95% stop is confirmed on 200 fresh openings.
+
+To get from about 50% towards 95%, give it far more games: a Colab run with more cores for many
+hours. You can also try `--sims 96`, `--games-per-iter 96`, a bigger network
+(`--channels 96 --blocks 8`) or a lower `--heuristic-mix` once the value loss has dropped.
 
 
 ### Running locally and main options

@@ -6,10 +6,16 @@ always starts near row 8 and walks towards row 0. This only happens inside
 the network's input tensor; the real game state is never flipped.
 
 Input planes (``N_PLANES x 9 x 9`` float32):
-    0  my pawn                       4  my walls left / 10 (constant plane)
-    1  opponent pawn                 5  opponent walls left / 10
-    2  horizontal walls (8x8, padded)  6  my BFS distance to my goal / 20
-    3  vertical walls (8x8, padded)    7  opponent distance to their goal / 20
+    0  my pawn                         6  my BFS distance to my goal / 20
+    1  opponent pawn                   7  opponent distance to their goal / 20
+    2  horizontal walls (8x8, padded)  8  h-wall: steps it would ADD to the opponent's path / 10
+    3  vertical walls (8x8, padded)    9  v-wall: steps it would add to the opponent's path / 10
+    4  my walls left / 10 (constant)  10  h-wall: steps it would add to MY path / 10
+    5  opponent walls left / 10       11  v-wall: steps it would add to my path / 10
+
+Planes 8-11 ("wall gain maps") make good wall placements easy to learn: the
+network sees directly which of the 128 wall spots hurt the opponent. Without
+them it has to infer this from raw wall maps, which it learns very slowly.
 
 Actions (``N_ACTIONS = 209``, canonical coordinates):
     0..80     move pawn to square r*9+c
@@ -25,7 +31,8 @@ import numpy as np
 
 from ..bots.alphabeta import N, NW, STEP, FastBoard
 
-N_PLANES = 8
+N_PLANES = 12
+WALL_PLANES = (2, 3, 8, 9, 10, 11)  # 8x8 anchor maps padded to 9x9
 N_ACTIONS = N * N + 2 * NW * NW  # 209
 H_OFFSET = N * N
 V_OFFSET = N * N + NW * NW
@@ -86,8 +93,9 @@ def mirror_batch(planes: np.ndarray, pis: np.ndarray) -> tuple[np.ndarray, np.nd
     """Left-right mirror augmentation (the game is symmetric)."""
     out = planes[..., ::-1].copy()
     # Wall planes are 8x8 maps padded to 9x9: mirror only the 8x8 part.
-    out[:, 2:4, :8, :8] = planes[:, 2:4, :8, :8][..., ::-1]
-    out[:, 2:4, :, 8] = 0
+    for k in WALL_PLANES:
+        out[:, k, :8, :8] = planes[:, k, :8, :8][..., ::-1]
+        out[:, k, :, 8] = 0
     return out, pis[:, MIRROR_PERM]
 
 
@@ -116,6 +124,36 @@ def _distance_map(board: FastBoard, goal_row: int) -> np.ndarray:
     return out.reshape(N, N)
 
 
+def wall_gains(board: FastBoard, player: int) -> dict[tuple[str, int], int]:
+    """Extra steps each legal wall would add to ``player``'s shortest path.
+
+    Only walls cutting an edge of the current shortest path can lengthen it,
+    so only those are tested (about 10-30 BFS runs per call).
+    """
+    base = board.distance(player)
+    path = board.shortest_path(player)
+    gains: dict[tuple[str, int], int] = {}
+    for a_sq, b_sq in zip(path, path[1:]):
+        ra, ca = divmod(a_sq, N)
+        rb, cb = divmod(b_sq, N)
+        if ra == rb:
+            c = min(ca, cb)
+            cands = [("v", r * NW + c) for r in (ra - 1, ra) if 0 <= r < NW and c < NW]
+        else:
+            r = min(ra, rb)
+            cands = [("h", r * NW + c) for c in (ca - 1, ca) if 0 <= c < NW and r < NW]
+        for o, a in cands:
+            if (o, a) in gains or board.overlaps(o, a):
+                continue
+            board._set_wall(o, a, False)
+            d0, d1 = board.distance(0), board.distance(1)
+            board._set_wall(o, a, True)
+            if d0 is None or d1 is None:
+                continue  # illegal: would cut someone off
+            gains[(o, a)] = (d0 if player == 0 else d1) - base  # type: ignore[operator]
+    return gains
+
+
 def encode(board: FastBoard, mirror: bool = False) -> np.ndarray:
     """Planes for the side to move. ``mirror`` = left-right augmentation."""
     me = board.turn
@@ -141,6 +179,11 @@ def encode(board: FastBoard, mirror: bool = False) -> np.ndarray:
         if mirror:
             dm = dm[:, ::-1]
         x[plane] = dm
+    for (plane_h, player) in ((8, opp), (10, me)):
+        for (o, a), g in wall_gains(board, player).items():
+            if g > 0:
+                r, c = divmod(_anchor(a, flip, mirror), NW)
+                x[plane_h + (o == "v"), r, c] = min(g, 10) / 10.0
     return x
 
 

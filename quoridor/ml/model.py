@@ -33,7 +33,7 @@ class ResBlock(nn.Module):
 
 
 class PolicyValueNet(nn.Module):
-    """Input: (B, 8, 9, 9) planes. Output: policy logits (B, 209), value (B,) in [-1, 1]."""
+    """Input: (B, N_PLANES=12, 9, 9) planes. Output: policy logits (B, 209), value (B,) in [-1, 1]."""
 
     def __init__(self, cfg: ModelConfig = ModelConfig()) -> None:
         super().__init__()

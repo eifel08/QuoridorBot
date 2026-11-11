@@ -53,7 +53,7 @@ class TestEncoding(unittest.TestCase):
         x1 = encode(b)
         b.turn = 0
         np.testing.assert_array_equal(encode(b), x1)
-        self.assertEqual(x0.shape, (8, 9, 9))
+        self.assertEqual(x0.shape, (12, 9, 9))
 
     def test_mirror_batch_matches_mirrored_encoding(self):
         from quoridor.ml.encoding import mirror_batch
@@ -66,6 +66,26 @@ class TestEncoding(unittest.TestCase):
             mirrored_moves = {move_to_action(m, b.turn == 1, True) for m in b.legal_moves()}
             self.assertEqual(set(np.flatnonzero(pis[0])), mirrored_moves)
             self.assertTrue((MIRROR_PERM[MIRROR_PERM] == np.arange(N_ACTIONS)).all())
+
+    def test_wall_gain_planes(self):
+        from quoridor import Board
+        from quoridor.ml.encoding import wall_gains
+        for st in STATES[::6]:
+            b = FastBoard(st)
+            board = st.to_board()
+            for player in (0, 1):
+                base = board.shortest_path_length(player)
+                for (o, a), g in wall_gains(b, player).items():
+                    r, c = divmod(a, NW)
+                    tmp = board.copy()
+                    tmp.walls.add((r, c, __import__("quoridor").Orientation(o)))
+                    self.assertEqual(tmp.shortest_path_length(player) - base, g)
+        # Start position: a horizontal wall right in front of the opponent adds a step.
+        b = FastBoard.initial()
+        x = encode(b)
+        self.assertGreater(x[8].sum(), 0)
+        self.assertTrue(np.all(x[8:, 8, :] == 0) and np.all(x[8:, :, 8] == 0))
+        del Board
 
     def test_legal_mask(self):
         b = FastBoard.initial()

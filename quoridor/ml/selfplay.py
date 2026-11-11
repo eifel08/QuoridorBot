@@ -28,7 +28,7 @@ import torch
 
 from ..bots.alphabeta import FastBoard, search_board
 from .arena import MAX_PLIES, random_opening
-from .encoding import N_ACTIONS, encode, move_to_action
+from .encoding import N_ACTIONS, N_PLANES, encode, move_to_action
 from .mcts import agent_move
 from .model import Evaluator, ModelConfig, PolicyValueNet
 
@@ -80,7 +80,7 @@ def _one_hot(move: IMove, board: FastBoard) -> np.ndarray:
 
 
 def _finish(records: list[tuple[np.ndarray, np.ndarray, int]], winner: Optional[int]):
-    planes = np.stack([r[0] for r in records]).astype(np.float16) if records else np.zeros((0, 8, 9, 9), np.float16)
+    planes = np.stack([r[0] for r in records]).astype(np.float16) if records else np.zeros((0, N_PLANES, 9, 9), np.float16)
     pis = np.stack([r[1] for r in records]).astype(np.float16) if records else np.zeros((0, N_ACTIONS), np.float16)
     z = np.array([0.0 if winner is None else (1.0 if side == winner else -1.0) for _, _, side in records],
                  dtype=np.float32)

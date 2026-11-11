@@ -37,7 +37,7 @@ import torch
 import torch.nn.functional as F
 
 from .arena import wilson_lower_bound
-from .encoding import N_ACTIONS, mirror_batch
+from .encoding import N_ACTIONS, N_PLANES, mirror_batch
 from .model import ModelConfig, PolicyValueNet, save_checkpoint
 from .selfplay import (GameSettings, default_workers, run_eval, run_teacher, run_training,
                        serialize_model, worker_init)
@@ -99,7 +99,7 @@ PRESETS = {
 class ReplayBuffer:
     def __init__(self, capacity: int) -> None:
         self.capacity = capacity
-        self.planes = np.zeros((capacity, 8, 9, 9), dtype=np.float16)
+        self.planes = np.zeros((capacity, N_PLANES, 9, 9), dtype=np.float16)
         self.pis = np.zeros((capacity, N_ACTIONS), dtype=np.float16)
         self.z = np.zeros(capacity, dtype=np.float32)
         self.size = 0

@@ -228,6 +228,78 @@ class FastBoard:
     def won(self, player: int) -> bool:
         return self.pawns[player] // N == self.goal[player]
 
+    # ------------------------------------------------------------------ #
+    # Helpers used by the ML pipeline (quoridor/ml)
+    # ------------------------------------------------------------------ #
+    @classmethod
+    def initial(cls) -> "FastBoard":
+        """Start position (Player 1 at (8, 4) to move)."""
+        from ..board import Board
+
+        return cls(Board().snapshot(0))
+
+    def copy(self) -> "FastBoard":
+        other = FastBoard.__new__(FastBoard)
+        other.pawns = list(self.pawns)
+        other.goal = list(self.goal)
+        other.walls_left = list(self.walls_left)
+        other.turn = self.turn
+        other.h = set(self.h)
+        other.v = set(self.v)
+        other.open_ = [list(o) for o in self.open_]
+        other.hash = self.hash
+        return other
+
+    def legal_walls(self, player: int) -> list[tuple[str, int]]:
+        """All legal wall placements for ``player`` as ("h"|"v", anchor).
+
+        Same result as ``Board.valid_walls`` but much faster: a wall that does
+        not cut an edge of a player's current shortest path cannot disconnect
+        that player, so only walls touching one of the two paths need a BFS.
+        """
+        if self.walls_left[player] <= 0:
+            return []
+        risky: set[tuple[str, int]] = set()
+        for p in (0, 1):
+            path = self.shortest_path(p)
+            for a_sq, b_sq in zip(path, path[1:]):
+                ra, ca = divmod(a_sq, N)
+                rb, cb = divmod(b_sq, N)
+                if ra == rb:
+                    c = min(ca, cb)
+                    for r in (ra - 1, ra):
+                        if 0 <= r < NW and c < NW:
+                            risky.add(("v", r * NW + c))
+                else:
+                    r = min(ra, rb)
+                    for c in (ca - 1, ca):
+                        if 0 <= c < NW and r < NW:
+                            risky.add(("h", r * NW + c))
+        out: list[tuple[str, int]] = []
+        for o in "hv":
+            for a in range(NW * NW):
+                if self.overlaps(o, a):
+                    continue
+                if (o, a) in risky:
+                    self._set_wall(o, a, False)
+                    ok = self.distance(0) is not None and self.distance(1) is not None
+                    self._set_wall(o, a, True)
+                    if not ok:
+                        continue
+                out.append((o, a))
+        return out
+
+    def legal_moves(self) -> list[tuple[str, int]]:
+        """Every legal move for the side to move (pawn moves first)."""
+        me = self.turn
+        return [("p", sq) for sq in self.pawn_moves(me)] + self.legal_walls(me)
+
+    def play(self, m: tuple[str, int]) -> Optional[int]:
+        """Apply a move for the side to move; returns the winner index or None."""
+        mover = self.turn
+        self.make(m)
+        return mover if m[0] == "p" and self.won(mover) else None
+
 
 def evaluate(board: FastBoard) -> int:
     """Negamax value for the side to move: opponent steps - own steps (= -Score)."""
@@ -236,14 +308,16 @@ def evaluate(board: FastBoard) -> int:
 
 
 class AlphaBetaSearch:
-    def __init__(self, board: FastBoard, deadline: Optional[float]) -> None:
+    def __init__(self, board: FastBoard, deadline: Optional[float],
+                 rng: Optional[random.Random] = None) -> None:
         self.b = board
         self.deadline = deadline
+        self.rng = rng
         self.nodes = 0
         self.tt: dict[int, tuple[int, int, int, Optional[IMove]]] = {}
 
     # ------------------------------------------------------------------ #
-    def ordered_moves(self, tt_move: Optional[IMove]) -> list[IMove]:
+    def ordered_moves(self, tt_move: Optional[IMove], shuffle: bool = False) -> list[IMove]:
         b = self.b
         me, opp = b.turn, 1 - b.turn
         my_d = b.distance(me)
@@ -289,6 +363,8 @@ class AlphaBetaSearch:
                 if gain > base:
                     scored.append((gain, m))
 
+        if shuffle and self.rng is not None:
+            self.rng.shuffle(scored)  # random tie-breaking among equally ordered moves
         scored.sort(key=lambda t: -t[0])  # stable: pawn moves win ties
         moves = [m for _, m in scored]
         if tt_move is not None and tt_move in moves:
@@ -350,7 +426,7 @@ class AlphaBetaSearch:
         me = b.turn
         alpha, beta = -WIN * 2, WIN * 2
         best_val, best_move = -WIN * 2, None
-        for m in self.ordered_moves(pv_move):
+        for m in self.ordered_moves(pv_move, shuffle=True):
             prev = b.pawns[me]
             b.make(m)
             if m[0] == "p" and b.won(me):
@@ -365,12 +441,34 @@ class AlphaBetaSearch:
         return best_val, best_move
 
 
-def search(state: BoardState, depth: int, time_limit: Optional[float] = None) -> tuple[Move, dict]:
-    """Iterative-deepening alpha-beta search. Returns (move, info)."""
+def search(state: BoardState, depth: int, time_limit: Optional[float] = None,
+           rng: Optional[random.Random] = None) -> tuple[Move, dict]:
+    """Iterative-deepening alpha-beta search. Returns (move, info).
+
+    ``rng`` (optional) breaks ties between equally good moves at random;
+    without it the bot is fully deterministic.
+    """
+    best_move, info = search_board(FastBoard(state), depth, time_limit, rng)
+    kind, x = best_move
+    if kind == "p":
+        move: Move = PawnMove(*divmod(x, N))
+    else:
+        r, c = divmod(x, NW)
+        move = WallMove(r, c, Orientation(kind))
+    info["move"] = str(move)
+    return move, info
+
+
+def search_board(board: FastBoard, depth: int, time_limit: Optional[float] = None,
+                 rng: Optional[random.Random] = None) -> tuple[IMove, dict]:
+    """Same as :func:`search` on a :class:`FastBoard` (left unchanged).
+
+    Returns the internal move ``("p", square)`` / ``("h"|"v", anchor)``.
+    """
     depth = max(1, min(int(depth), MAX_DEPTH))
     start = time.perf_counter()
     deadline = start + time_limit if time_limit else None
-    s = AlphaBetaSearch(FastBoard(state), deadline)
+    s = AlphaBetaSearch(board.copy(), deadline, rng)
     best_move: Optional[IMove] = None
     best_val = 0
     reached = 0
@@ -386,12 +484,6 @@ def search(state: BoardState, depth: int, time_limit: Optional[float] = None) ->
     if best_move is None:  # timed out before depth 1 finished: take the best-ordered move
         best_move = s.ordered_moves(None)[0]
 
-    kind, x = best_move
-    if kind == "p":
-        move: Move = PawnMove(*divmod(x, N))
-    else:
-        r, c = divmod(x, NW)
-        move = WallMove(r, c, Orientation(kind))
     info = {
         "depth_requested": depth,
         "depth_reached": reached,
@@ -400,9 +492,8 @@ def search(state: BoardState, depth: int, time_limit: Optional[float] = None) ->
         # Score = own steps - opponent steps (lower is better for the bot).
         "score": -best_val if abs(best_val) < WIN - 1000 else None,
         "forced": None if abs(best_val) < WIN - 1000 else ("win" if best_val > 0 else "loss"),
-        "move": str(move),
     }
-    return move, info
+    return best_move, info
 
 
 class AlphaBetaBot(Player):

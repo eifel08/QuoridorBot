@@ -115,6 +115,138 @@ winner = game.run()
 move, info = search(game.state, depth=6, time_limit=None)  # one-off analysis
 ```
 
+## Training an ML agent (Google Colab)
+
+The `quoridor/ml/` package trains a neural-network agent whose goal is to **win at least 95% of
+games against the Depth-4 alpha-beta bot**. Training stops by itself and saves
+`milestone_95.pt` once it gets there.
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/eifel08/QuoridorBot/blob/feature/ml-training-pipeline/notebooks/train_colab.ipynb)
+
+### Step by step in Colab
+
+1. Click the badge above, or go to [colab.research.google.com](https://colab.research.google.com),
+   choose *File → Open notebook → GitHub*, paste `eifel08/QuoridorBot`, select the branch
+   `feature/ml-training-pipeline` and open `notebooks/train_colab.ipynb`.
+   (Once this branch is merged into `main`, change `blob/feature/ml-training-pipeline` in the
+   link to `blob/main` and `BRANCH` in the first cell to `main`.)
+2. *Runtime → Change runtime type → T4 GPU* (or any GPU). Games run on the CPU, so a runtime
+   with more CPU cores (Colab Pro, High-RAM) trains faster. The notebook prints how many cores
+   you got.
+3. *Runtime → Run all*. Allow access to Google Drive when asked. The notebook:
+   - clones this repository and installs `requirements-ml.txt` (PyTorch is already on Colab);
+   - runs a one-minute self-test;
+   - opens TensorBoard;
+   - starts training with checkpoints in `MyDrive/QuoridorBot/runs/<RUN_NAME>/`.
+4. Watch the progress (next section). When the session ends or disconnects, reconnect and run all
+   cells again: training continues from the last checkpoint in the same `RUN_NAME` folder.
+5. At the end, the notebook re-tests the final model on 200 new openings and offers it for
+   download. Play against it with `python main.py --ml-model milestone_95.pt`.
+
+### Monitoring
+
+- **Training output**, one line per iteration, plus an evaluation every few iterations:
+  ```
+  [ 1.42h it   36] train: agent won 31% of 48 games, loss p=1.874 v=0.612, 205s
+  [ 1.42h it   36] EVAL vs Depth-4: win rate 38.0% (38/100, 95% CI low 28.9%, red 40% / blue 36%)
+  ```
+- **TensorBoard** (started in the notebook): `eval/win_rate` is the number that has to reach 0.95.
+  Also useful: `train/train_win_rate`, `train/policy_loss`, `train/value_loss`.
+- **`metrics.jsonl`** in the run folder, one JSON record per event. Notebook step 8 plots it,
+  even after a disconnect.
+- **Files** in the run folder:
+
+  | File | Contents |
+  |---|---|
+  | `latest.pt` | last iteration's model and optimizer state, used to resume |
+  | `best.pt` | the model with the best evaluation win rate so far |
+  | `milestone_95.pt` | written when 95% is reached and confirmed |
+  | `buffer.npz` | recent training positions, so a resumed run doesn't start with empty data |
+
+### How the training works
+
+- **Opponent and evaluation.** The Depth-4 bot is deterministic, so every game starts from a
+  *seeded random opening* (0-6 random moves). Otherwise each evaluation game would be identical and
+  the win rate would always be 0% or 100%. An evaluation is `--eval-games` games (default 100)
+  against the deterministic bot on the same fixed openings each time, so checkpoints are compared
+  fairly. The agent plays Red in half of them and Blue in the other half.
+- **Stopping condition.** When an evaluation reaches `--target-win-rate` (default 0.95), the model
+  plays `--confirm-games` (default 200) *new* openings, to rule out a lucky run on the fixed set.
+  If that also reaches the target, it is saved as `milestone_95.pt` and training stops.
+  `--keep-training` continues after that. The output also shows a 95% confidence lower bound
+  ("CI low") for each win rate.
+- **Agent.** A residual convolutional network (6 blocks × 64 channels, ~0.5 M parameters).
+  - *Input*: pawns, walls, walls left and both players' BFS distance maps, always encoded from the
+    side to move. Inside the network input only, Blue's view is mirrored so it also "moves up";
+    the game itself is never flipped.
+  - *Outputs*: a move distribution over 209 actions (81 pawn squares, 64 horizontal and 64
+    vertical walls), with illegal moves masked out, and a value in [-1, 1] estimating who wins.
+  - *Playing*: an MCTS (PUCT) search with `--sims` simulations per move picks the move.
+- **Phase 1, warm-up by imitation.** `--warmup-games` games of alpha-beta against alpha-beta. The
+  network learns to copy the bot's moves and predict the winner, so the next phase doesn't start
+  from random play.
+- **Phase 2, RL against the Depth-4 bot (expert iteration).** Each iteration:
+  - the agent plays `--games-per-iter` games against the bot, with exploration noise and random
+    moves early in the game;
+  - its positions get the MCTS visit counts as the move target and the game result as the value
+    target. The bot's own moves are also imitated (`--learn-opponent-moves`);
+  - `--train-steps` training steps on a replay buffer, with left-right mirroring as augmentation;
+  - `latest.pt` is saved.
+- **Parallelism.** Games run on all CPU cores (`--workers`), and the network trains on the GPU if
+  there is one.
+
+### Expectations (read this before a long run)
+
+Deeper alpha-beta with the same heuristic does **not** come close to 95% against Depth 4.
+Measured with `python -m quoridor.ml.evaluate --baseline D` (40 games each, random openings):
+
+| Agent | Win rate vs Depth 4 |
+|---|---|
+| alpha-beta depth 1 | 5% |
+| alpha-beta depth 2 | 35% |
+| alpha-beta depth 3 | 55% |
+| alpha-beta depth 4 | 45% (mirror match) |
+| alpha-beta depth 5 | 50% |
+| alpha-beta depth 6 | 50% |
+
+So the ML agent has to learn the Depth-4 bot's specific blind spots: it only considers walls that
+immediately lengthen the opponent's path, and it doesn't look past 4 moves. That is learnable, but
+it takes many games. Expect hours to days of compute rather than minutes, and there is no
+guarantee a given run reaches 95%. `best.pt` always holds the strongest model so far.
+
+
+### Running locally and main options
+
+```bash
+pip install -r requirements-ml.txt
+```
+```bash
+python -m quoridor.ml.train --out runs/exp1                    # start or resume
+```
+```bash
+python -m quoridor.ml.train --out runs/exp1 --preset smoke     # 2-minute pipeline check
+```
+```bash
+python -m quoridor.ml.evaluate --model runs/exp1/best.pt --games 200
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--preset` | none | `smoke` (tiny test), `colab-free` (lighter iterations), `full` |
+| `--target-win-rate` | 0.95 | stop when this win rate vs Depth 4 is reached and confirmed |
+| `--eval-games` / `--eval-every` | 100 / 2 | evaluation size and frequency (in iterations) |
+| `--confirm-games` | 200 | fresh-opening games to confirm the target (0 = skip) |
+| `--games-per-iter` / `--train-steps` | 48 / 300 | games and training steps per iteration |
+| `--sims` / `--eval-sims` | 64 / 64 | MCTS simulations per move in training / evaluation |
+| `--warmup-games` / `--warmup-steps` | 300 / 3000 | imitation warm-up size |
+| `--channels` / `--blocks` | 64 / 6 | network size |
+| `--opponent-depth` | 4 | which alpha-beta depth to train against and evaluate on |
+| `--max-hours` | none | save and stop cleanly after this long (resume later) |
+| `--workers` | all cores | parallel game processes |
+| `--fresh` / `--keep-training` | off | ignore an existing run / keep going after the milestone |
+
+`python -m quoridor.ml.train --help` lists all options.
+
 ## Desktop and terminal versions
 
 Requires Python 3.9+. Install the dependency (only needed for the desktop GUI):
@@ -135,6 +267,7 @@ two can't be installed side by side.
 | `python3 main.py --p1 Alice --p2 Bob` | desktop window with names |
 | `python3 main.py --cli` | terminal (no dependencies; asks for the mode) |
 | `python3 main.py --mode bot --depth 6` | desktop window, straight into Human vs Bot |
+| `python3 main.py --ml-model best.pt` | play against a trained ML agent (needs PyTorch) |
 | `python3 main.py --web` | browser version on localhost |
 
 Run the tests (GUI tests run headless and are skipped without pygame; the web engine test
@@ -215,6 +348,17 @@ quoridor/
   board.py             Mutable rules engine: movement/jumps, wall validation, BFS
   player.py            Player (abstract base), CLI HumanPlayer, command parser
   bots/alphabeta.py    AlphaBetaBot: negamax alpha-beta search, heuristic, iterative deepening
+  ml/                  ML agent + training pipeline (PyTorch, see requirements-ml.txt)
+    arena.py           fast game runner, seeded random openings, win-rate statistics
+    encoding.py        board -> network planes, 209-action space, mirroring
+    model.py           policy-value ResNet, checkpoints
+    mcts.py            PUCT Monte Carlo tree search
+    selfplay.py        warm-up / training / evaluation games (worker processes)
+    train.py           training loop, evaluation, 95% stopping condition, resume
+    evaluate.py        standalone win-rate check
+    agent.py           MLPlayer: a trained model as a normal Player
+notebooks/train_colab.ipynb  Google Colab notebook for cloud training
+requirements-ml.txt  torch, numpy, tensorboard (training only)
   game.py              Game engine + GameObserver hooks for views
   renderer.py, cli.py  ASCII rendering and terminal front-end
   gui/

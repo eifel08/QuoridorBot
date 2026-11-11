@@ -70,14 +70,14 @@ class BotInfoView(GameObserver):
 
     def on_move(self, game: Game, player: int, move: Move, before: BoardState, after: BoardState) -> None:
         info = getattr(game.players[player], "last_info", None)
-        if info:
+        if info and "nodes" in info:
             outcome = f"forced {info['forced']}" if info.get("forced") else f"score {info['score']:+d}"
             print(f"  (searched depth {info['depth_reached']}/{info['depth_requested']}, "
                   f"{info['nodes']:,} positions in {info['seconds']:.2f}s, {outcome})")
 
 
 def run_cli(mode: Optional[str] = None, depth: int = 4, time_limit: Optional[float] = 5.0,
-            human_side: int = 0) -> None:
+            human_side: int = 0, ml_model: Optional[str] = None, ml_sims: int = 64) -> None:
     from .bots import AlphaBetaBot
 
     print("=== Quoridor ===")
@@ -95,7 +95,12 @@ def run_cli(mode: Optional[str] = None, depth: int = 4, time_limit: Optional[flo
         if mode == "hvb":
             name = input("\nYour name (blank = 'You'): ").strip() or "You"
             human = HumanPlayer(name)
-            bot = AlphaBetaBot(f"Bot (depth {depth})", depth, time_limit)
+            if ml_model:
+                from .ml.agent import MLPlayer
+
+                bot = MLPlayer(ml_model, "ML agent", ml_sims)
+            else:
+                bot = AlphaBetaBot(f"Bot (depth {depth})", depth, time_limit)
             players = (human, bot) if human_side == 0 else (bot, human)
         else:
             name1 = input("\nName for Player 1 (blank = 'Player 1'): ").strip() or "Player 1"

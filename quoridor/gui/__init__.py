@@ -19,7 +19,13 @@ __all__ = ["GuiBotPlayer", "GuiHumanPlayer", "Layout", "MatchSettings", "Quorido
 def build_players(settings: MatchSettings, gui: QuoridorGUI, names: tuple[str, str]):
     if settings.mode == "hvh":
         return GuiHumanPlayer(names[0], gui), GuiHumanPlayer(names[1], gui)
-    bot = GuiBotPlayer(AlphaBetaBot(f"Bot (depth {settings.depth})", settings.depth, settings.time_limit), gui)
+    if settings.ml_model:
+        from ..ml.agent import MLPlayer
+
+        inner = MLPlayer(settings.ml_model, "ML agent", settings.ml_sims)
+    else:
+        inner = AlphaBetaBot(f"Bot (depth {settings.depth})", settings.depth, settings.time_limit)
+    bot = GuiBotPlayer(inner, gui)
     human = GuiHumanPlayer(names[settings.human_side], gui)
     return (human, bot) if settings.human_side == 0 else (bot, human)
 

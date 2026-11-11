@@ -19,6 +19,8 @@ class MatchSettings:
     depth: int = 4               # bot search depth, 1..30
     time_limit: Optional[float] = 5.0  # seconds per bot move, None = no limit
     human_side: int = 0          # 0 = Red (moves first), 1 = Blue
+    ml_model: Optional[str] = None  # play against a trained ML checkpoint instead of alpha-beta
+    ml_sims: int = 64
 
 
 def _time_label(t: Optional[float]) -> str:

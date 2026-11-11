@@ -42,6 +42,8 @@ def main() -> None:
                         help="bot think time per move in seconds, 0 = no limit (default 5)")
     parser.add_argument("--play-as", type=int, choices=[1, 2], default=1,
                         help="against the bot: play as Player 1 (moves first) or 2")
+    parser.add_argument("--ml-model", help="trained checkpoint (.pt): the bot is the ML agent (needs PyTorch)")
+    parser.add_argument("--ml-sims", type=int, default=64, help="MCTS simulations per ML-agent move")
     parser.add_argument("--p1", default="Player 1", help="name of Player 1 (GUI)")
     parser.add_argument("--p2", default="Player 2", help="name of Player 2 (GUI)")
     args = parser.parse_args()
@@ -49,6 +51,8 @@ def main() -> None:
         parser.error("--depth must be between 1 and 30")
     mode = {"human": "hvh", "bot": "hvb", None: None}[args.mode]
     time_limit = args.time_limit or None
+    if args.ml_model and mode is None:
+        mode = "hvb"
 
     if args.web:
         serve_web(args.port, open_browser=not args.no_browser)
@@ -57,7 +61,7 @@ def main() -> None:
     if args.cli:
         from quoridor.cli import run_cli
 
-        run_cli(mode, args.depth, time_limit, args.play_as - 1)
+        run_cli(mode, args.depth, time_limit, args.play_as - 1, args.ml_model, args.ml_sims)
         return
 
     try:
@@ -67,7 +71,7 @@ def main() -> None:
                  "or play in the terminal with: python3 main.py --cli")
     from quoridor.gui import MatchSettings
 
-    settings = MatchSettings(mode or "hvh", args.depth, time_limit, args.play_as - 1)
+    settings = MatchSettings(mode or "hvh", args.depth, time_limit, args.play_as - 1, args.ml_model, args.ml_sims)
     run_gui(args.p1, args.p2, settings=settings, show_menu=mode is None)
 
 

@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .encoding import N_ACTIONS, N_PLANES
+from .encoding import N_ACTIONS, N_PLANES, heuristic_value
 
 
 @dataclass
@@ -53,11 +53,17 @@ class PolicyValueNet(nn.Module):
 
 
 class Evaluator:
-    """Inference wrapper: numpy planes + legal mask -> (priors, value)."""
+    """Inference wrapper: numpy planes + legal mask -> (priors, value).
 
-    def __init__(self, net: PolicyValueNet, device: str = "cpu") -> None:
+    ``heuristic_mix`` blends the network value with the path-length heuristic:
+    ``value = (1 - mix) * network + mix * heuristic``. A mix around 0.5 makes
+    MCTS play sensibly while the value head is still untrained; 0 = pure network.
+    """
+
+    def __init__(self, net: PolicyValueNet, device: str = "cpu", heuristic_mix: float = 0.0) -> None:
         self.net = net.to(device).eval()
         self.device = device
+        self.heuristic_mix = heuristic_mix
 
     @torch.no_grad()
     def __call__(self, planes: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, float]:
@@ -68,7 +74,10 @@ class Evaluator:
         logits -= logits.max()
         p = np.exp(logits)
         p /= p.sum()
-        return p, float(value[0])
+        v = float(value[0])
+        if self.heuristic_mix:
+            v = (1 - self.heuristic_mix) * v + self.heuristic_mix * heuristic_value(planes)
+        return p, v
 
 
 def save_checkpoint(path, net: PolicyValueNet, **extra) -> None:

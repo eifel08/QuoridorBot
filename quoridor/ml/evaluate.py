@@ -34,7 +34,9 @@ def main(argv=None) -> dict:
         from .selfplay import GameSettings, default_workers, run_eval, serialize_model, worker_init
 
         net, ckpt = load_model(a.model, "cpu")
-        gs = GameSettings(opponent_depth=a.opponent_depth, eval_sims=a.sims, opening_plies=a.opening_plies)
+        mix = ckpt.get("config", {}).get("heuristic_mix", 0.0)
+        gs = GameSettings(opponent_depth=a.opponent_depth, eval_sims=a.sims, opening_plies=a.opening_plies,
+                          heuristic_mix=mix)
         blob = serialize_model(net)
         ctx = mp.get_context("fork" if sys.platform != "win32" else "spawn")
         with ctx.Pool(a.workers or default_workers(), initializer=worker_init) as pool:

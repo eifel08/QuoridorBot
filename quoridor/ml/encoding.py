@@ -187,6 +187,17 @@ def encode(board: FastBoard, mirror: bool = False) -> np.ndarray:
     return x
 
 
+def heuristic_value(planes: np.ndarray, scale: float = 3.0) -> float:
+    """Path-length heuristic in [-1, 1] for the side to move, read from the planes.
+
+    Same idea as the alpha-beta bot: positive when the opponent needs more
+    steps than "me". Used to stabilise MCTS while the value head is still weak.
+    """
+    me = float(planes[6][planes[0] > 0][0]) * 20
+    opp = float(planes[7][planes[1] > 0][0]) * 20
+    return float(np.tanh((opp - me) / scale))
+
+
 def legal_mask(board: FastBoard, moves: list[IMove] | None = None) -> np.ndarray:
     """Boolean mask over canonical actions for the side to move."""
     flip = board.turn == 1

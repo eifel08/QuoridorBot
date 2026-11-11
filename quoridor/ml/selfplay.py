@@ -45,6 +45,7 @@ class GameSettings:
     opening_plies: int = 6
     learn_opponent_moves: bool = True  # also imitate the bot's moves in training games
     opponent_random_ties: float = 0.5  # share of training games where the bot breaks ties randomly
+    heuristic_mix: float = 0.5   # blend of path heuristic into the MCTS value (0 = network only)
 
 
 # ---------------------------------------------------------------------- #
@@ -63,12 +64,12 @@ def serialize_model(net: PolicyValueNet) -> bytes:
     return buf.getvalue()
 
 
-def _evaluator(version: int, blob: bytes) -> Evaluator:
-    if _worker_model["version"] != version:
+def _evaluator(version: int, blob: bytes, mix: float = 0.0) -> Evaluator:
+    if _worker_model["version"] != version or _worker_model["evaluator"].heuristic_mix != mix:
         data = torch.load(io.BytesIO(blob), map_location="cpu", weights_only=False)
         net = PolicyValueNet(ModelConfig(**data["cfg"]))
         net.load_state_dict(data["state"])
-        _worker_model.update(version=version, evaluator=Evaluator(net, "cpu"))
+        _worker_model.update(version=version, evaluator=Evaluator(net, "cpu", mix))
     return _worker_model["evaluator"]
 
 
@@ -103,7 +104,7 @@ def teacher_game(seed: int, gs: GameSettings):
 
 
 def training_game(seed: int, version: int, blob: bytes, gs: GameSettings):
-    ev = _evaluator(version, blob)
+    ev = _evaluator(version, blob, gs.heuristic_mix)
     rng = random.Random(seed)
     nrng = np.random.default_rng(seed)
     board = random_opening(rng, gs.opening_plies)
@@ -131,7 +132,7 @@ def training_game(seed: int, version: int, blob: bytes, gs: GameSettings):
 
 def eval_game(index: int, eval_seed: int, version: int, blob: bytes, gs: GameSettings) -> dict:
     """One evaluation game, same openings as ``arena.match`` for a given seed."""
-    ev = _evaluator(version, blob)
+    ev = _evaluator(version, blob, gs.heuristic_mix)
     rng = random.Random(eval_seed * 1_000_003 + index)
     board = random_opening(rng, gs.opening_plies)
     agent_side = index % 2

@@ -55,9 +55,10 @@ class TrainConfig:
     sims: int = 64
     temp_moves: int = 8
     learn_opponent_moves: bool = True
+    heuristic_mix: float = 0.5   # MCTS value = (1-mix)*network + mix*path heuristic
     # warm-up (imitation of alpha-beta games, run once at the start)
-    warmup_games: int = 300
-    warmup_steps: int = 3000
+    warmup_games: int = 1000
+    warmup_steps: int = 4000
     # RL loop
     iterations: int = 100000
     games_per_iter: int = 48
@@ -89,7 +90,8 @@ PRESETS = {
                   train_steps=20, sims=8, eval_sims=8, eval_every=1, eval_games=6,
                   confirm_games=6, iterations=2, batch_size=64),
     # Free Colab (2 CPU cores): fewer games per iteration so progress shows up regularly.
-    "colab-free": dict(games_per_iter=16, train_steps=150, eval_games=60, eval_every=3, sims=48, eval_sims=48),
+    "colab-free": dict(games_per_iter=16, train_steps=150, eval_games=60, eval_every=3, sims=48, eval_sims=48,
+                       warmup_games=400, warmup_steps=3000),
     # Colab Pro / many-core machines.
     "full": dict(),
 }
@@ -152,7 +154,8 @@ class Trainer:
         self.warmed_up = False
         self.start_time = time.time()
         self.gs = GameSettings(cfg.opponent_depth, cfg.teacher_depth, cfg.sims, cfg.eval_sims,
-                               cfg.temp_moves, cfg.opening_plies, cfg.learn_opponent_moves)
+                               cfg.temp_moves, cfg.opening_plies, cfg.learn_opponent_moves,
+                               heuristic_mix=cfg.heuristic_mix)
         self.tb = None
         try:
             from torch.utils.tensorboard import SummaryWriter

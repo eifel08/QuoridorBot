@@ -87,6 +87,15 @@ class TestEncoding(unittest.TestCase):
         self.assertTrue(np.all(x[8:, 8, :] == 0) and np.all(x[8:, :, 8] == 0))
         del Board
 
+    def test_heuristic_value(self):
+        from quoridor.ml.encoding import heuristic_value
+        b = FastBoard.initial()
+        self.assertAlmostEqual(heuristic_value(encode(b)), 0.0)
+        b.pawns[0] = 2 * 9 + 4  # Red (to move) needs 2 steps, Blue 8
+        self.assertGreater(heuristic_value(encode(b)), 0.9)
+        b.turn = 1  # same position from Blue's side: clearly bad
+        self.assertLess(heuristic_value(encode(b)), -0.9)
+
     def test_legal_mask(self):
         b = FastBoard.initial()
         self.assertEqual(int(legal_mask(b).sum()), 3 + 128)

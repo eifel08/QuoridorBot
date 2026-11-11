@@ -31,11 +31,13 @@ class MLPlayer(Player):
     """
 
     def __init__(self, model_path: str, name: str = "ML agent", sims: int = 64,
-                 device: Optional[str] = None) -> None:
+                 device: Optional[str] = None, heuristic_mix: Optional[float] = None) -> None:
         super().__init__(name)
         device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        net, _ = load_model(model_path, device)
-        self.evaluator = Evaluator(net, device)
+        net, ckpt = load_model(model_path, device)
+        if heuristic_mix is None:  # use the setting the model was trained with
+            heuristic_mix = ckpt.get("config", {}).get("heuristic_mix", 0.0)
+        self.evaluator = Evaluator(net, device, heuristic_mix)
         self.sims = sims
         self.last_info: dict = {}
 

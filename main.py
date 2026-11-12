@@ -49,6 +49,12 @@ def main() -> None:
                              "opponent's shortest paths, both = attack + defense walls (default), all = "
                              "every legal wall. Applies to the Human vs Bot bot and to --bot1/--bot2 specs "
                              "that don't set walls= themselves (C++ engine only)")
+    parser.add_argument("--eval", choices=["on", "off"], default=None,
+                        help="eval bars: the bots' own search scores (Human vs Bot, Bot vs Bot; on by "
+                             "default), or a background evaluation in Human vs Human (off by default)")
+    parser.add_argument("--eval-engine", choices=["attack", "both", "all", "py"], default=None,
+                        help="Human vs Human eval: C++ engine with attack / attack+defense (default) / all "
+                             "walls, or the Python bot; 1 s per position. Implies --eval on")
     parser.add_argument("--play-as", type=int, choices=[1, 2], default=1,
                         help="against the bot: play as Player 1 (moves first) or 2")
     parser.add_argument("--ml-model", help="trained checkpoint (.pt): the bot is the ML agent (needs PyTorch)")
@@ -121,6 +127,13 @@ def main() -> None:
                              bots=specs, move_delay=args.delay)
     if wall_filter is not None:
         settings.wall_filter = wall_filter
+    if args.eval or args.eval_engine:
+        on = args.eval != "off"
+        settings.show_eval = on
+        settings.bot_evals = (on, on)
+        settings.hvh_eval = on
+        if args.eval_engine:
+            settings.eval_engine = args.eval_engine
     run_gui(args.p1, args.p2, settings=settings, show_menu=mode is None)
 
 

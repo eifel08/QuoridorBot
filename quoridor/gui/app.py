@@ -14,6 +14,7 @@ from typing import Optional
 
 import pygame
 
+from ..evaluation import BackgroundEvaluator, Eval
 from ..game import Game, GameObserver
 from ..moves import Move, Orientation, PawnMove, WallMove
 from ..player import QuitGame
@@ -31,6 +32,15 @@ class RestartGame(QuitGame):
 
 def _blend(a: tuple[int, int, int], b: tuple[int, int, int], t: float) -> tuple[int, int, int]:
     return tuple(int(x + (y - x) * t) for x, y in zip(a, b))  # type: ignore[return-value]
+
+
+def _count(n: int) -> str:
+    """776582 -> '777k', 2272464 -> '2.3M'."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 10_000:
+        return f"{n / 1000:.0f}k"
+    return f"{n:,}"
 
 
 class QuoridorGUI(GameObserver):
@@ -62,7 +72,34 @@ class QuoridorGUI(GameObserver):
         self.quit_requested = False
         self.mouse: tuple[int, int] = (0, 0)
         self._origin: Optional[tuple[float, ...]] = None  # pixel start of the next move animation
+        # Eval display. Slot 0 is the bar left of the board (Red's side), slot 1 the bar on the
+        # right (Blue's). A bot's own eval goes in its slot; the Human vs Human analysis uses slot 0.
+        self.eval_slots = [False, False]
+        self.eval_bars: list[Optional[tuple[Eval, Optional[int]]]] = [None, None]  # (eval, owner or None)
+        self.evaluator: Optional[BackgroundEvaluator] = None
         self._reset_interaction()
+
+    # ================================================================== #
+    # Eval display
+    # ================================================================== #
+    def set_eval_display(self, slots: tuple[bool, bool], evaluator: Optional[BackgroundEvaluator] = None) -> None:
+        """Which eval bars to draw, and the Human vs Human analysis engine (if any)."""
+        if self.evaluator is not None and self.evaluator is not evaluator:
+            self.evaluator.close()
+        self.evaluator = evaluator
+        self.eval_slots = list(slots)
+        self.eval_bars = [None, None]
+
+    def set_bot_eval(self, player: int, ev: Optional[Eval]) -> None:
+        """A bot's own search score after its move (shown in its colour on its side)."""
+        if ev is not None and self.eval_slots[player]:
+            self.eval_bars[player] = (ev, player)
+
+    def _analysis_result(self, ev: Eval, move_number: int) -> None:
+        # Called from the evaluator thread: only keep results for the position on the board.
+        st = self.state
+        if st is not None and st.winner is None and st.move_number == move_number:
+            self.eval_bars[0] = (ev, None)
 
     # ================================================================== #
     # GameObserver hooks
@@ -71,12 +108,15 @@ class QuoridorGUI(GameObserver):
         self.names = game.names
         self.state = state
         self.bot_info = None
+        self.eval_bars = [None, None]
         self.anims.clear()
         self.message = ""
         self._frame()
 
     def on_turn_start(self, game: Game, state: BoardState) -> None:
         self.state = state
+        if self.evaluator is not None:
+            self.evaluator.submit(state)
         self._reset_interaction()
         self._frame()
 
@@ -105,6 +145,8 @@ class QuoridorGUI(GameObserver):
     def on_game_over(self, game: Game, state: BoardState) -> None:
         self.state = state
         self.human_turn = False
+        if self.evaluator is not None and state.winner is not None:
+            self.eval_bars[0] = (Eval.game_won(state.winner), None)
         while True:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE):
@@ -327,6 +369,7 @@ class QuoridorGUI(GameObserver):
         s = self.screen
         s.fill(T.BACKGROUND)
         self._draw_board(st)
+        self._draw_eval_bars()
         self._draw_walls(st)
         if self.wall_drag and self.wall_preview is not None:
             color = T.PREVIEW_OK if self.wall_preview_ok else T.PREVIEW_BAD
@@ -373,7 +416,7 @@ class QuoridorGUI(GameObserver):
             x, y = L.square_center(0, i)
             self._text(str(i), (x, L.margin / 2), self.font_small, T.TEXT_DIM)
             x, y = L.square_center(i, 0)
-            self._text(str(i), (L.margin / 2, y), self.font_small, T.TEXT_DIM)
+            self._text(str(i), (L.row_label_x, y), self.font_small, T.TEXT_DIM)
 
     def _draw_walls(self, st: BoardState) -> None:
         animating = {a.data for a in self.anims if a.kind == "wall"}
@@ -468,13 +511,21 @@ class QuoridorGUI(GameObserver):
                          "Right-click / Esc cancels a drag")
             for i, line in enumerate(hints):
                 self._text(line, (cx, mid - 52 + 20 * i), self.font_small, T.TEXT_DIM)
+        info_y = L.button_rect[1] + L.button_rect[3] + 14
         if self.bot_info and "nodes" in self.bot_info:  # alpha-beta search stats
             info = self.bot_info
-            outcome = (f"forced {info['forced']}" if info.get("forced")
-                       else f"score {info['score']:+d}")
-            self._text(f"Bot: depth {info['depth_reached']}/{info['depth_requested']}, "
-                       f"{info['nodes']:,} pos, {info['seconds']:.2f}s, {outcome}",
-                       (cx, L.button_rect[1] + L.button_rect[3] + 14), self.font_small, T.TEXT_DIM)
+            ev = Eval.from_info(info, 0)
+            outcome = f"eval {ev.text()}" if ev is not None else f"forced {info.get('forced')}"
+            self._text(f"Bot: depth {info['depth_reached']}, {_count(info['nodes'])} pos, "
+                       f"{info['seconds']:.2f}s, {outcome}", (cx, info_y), self.font_small, T.TEXT_DIM)
+        elif self.evaluator is not None:
+            bar = self.eval_bars[0]
+            if bar is not None and bar[0].mate != 0:
+                ev = bar[0]
+                detail = f"depth {ev.depth}, {_count(ev.nodes)} pos, {ev.seconds:.2f}s"
+            else:
+                detail = "thinking..." if st.winner is None else "game over"
+            self._text(f"Eval ({self.evaluator.short_label}): {detail}", (cx, info_y), self.font_small, T.TEXT_DIM)
         if self.message and pygame.time.get_ticks() < self.message_until:
             self._text(self.message, (cx, mid + 14), self.font_small, T.PREVIEW_BAD, max_width=L.panel_width)
 
@@ -482,6 +533,44 @@ class QuoridorGUI(GameObserver):
         hovered = Layout.contains(L.button_rect, *self.mouse)
         pygame.draw.rect(s, _blend(T.PANEL, (255, 255, 255), 0.12 if hovered else 0.05), L.button_rect, border_radius=10)
         self._text("New game (R)", (bx + bw / 2, by + bh / 2), self.font_small, T.TEXT)
+
+    def _draw_eval_bars(self) -> None:
+        """Chess-style eval bars in Red (from the bottom) and Blue (from the top).
+
+        A bot's bar shows its own search score, written in its colour: positive is
+        good for that bot. The Human vs Human analysis bar writes the score in the
+        colour of the side it favours, at that side's end of the bar.
+        """
+        L, s = self.layout, self.screen
+        for slot in (0, 1):
+            if not self.eval_slots[slot]:
+                continue
+            x, y, w, h = L.eval_bar_rects[slot]
+            bar = self.eval_bars[slot]
+            pygame.draw.rect(s, T.PANEL, (x - 3, y - 3, w + 6, h + 6), border_radius=6)
+            if bar is None:
+                share, label, color, pos = 0.5, "...", T.TEXT_DIM, L.eval_text_pos[slot]
+                dim = 0.55
+            else:
+                ev, owner = bar
+                share, dim = ev.red_share(), 0.0
+                if owner is not None:
+                    label, color, pos = ev.for_player(owner).text(), T.PAWN_COLORS[owner], L.eval_text_pos[slot]
+                else:
+                    lead = ev.leader()
+                    label = ev.for_player(0 if lead is None else lead).text()
+                    color = T.TEXT if lead is None else T.PAWN_COLORS[lead]
+                    # Analysis readout at the favoured side's end: Red at the bottom, Blue at the top.
+                    tx = x + w / 2
+                    pos = (tx, L.height - L.margin / 2) if lead in (None, 0) else (tx, L.margin / 2)
+            red_h = round(h * share)
+            blue = _blend(T.PAWN_COLORS[1], T.PANEL, dim)
+            red = _blend(T.PAWN_COLORS[0], T.PANEL, dim)
+            pygame.draw.rect(s, blue, (x, y, w, h - red_h), border_top_left_radius=4, border_top_right_radius=4)
+            pygame.draw.rect(s, red, (x, y + h - red_h, w, red_h), border_bottom_left_radius=4,
+                             border_bottom_right_radius=4)
+            pygame.draw.line(s, T.TEXT_DIM, (x - 3, y + h / 2), (x + w + 2, y + h / 2), 1)  # equal
+            self._text(label, pos, self.font_small, color)
 
     def _draw_game_over(self, st: BoardState) -> None:
         L, s = self.layout, self.screen

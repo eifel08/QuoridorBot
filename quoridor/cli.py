@@ -116,7 +116,10 @@ class BotInfoView(GameObserver):
     def on_move(self, game: Game, player: int, move: Move, before: BoardState, after: BoardState) -> None:
         info = getattr(game.players[player], "last_info", None)
         if info and "nodes" in info:
-            outcome = f"forced {info['forced']}" if info.get("forced") else f"score {info['score']:+d}"
+            from .evaluation import Eval
+
+            ev = Eval.from_info(info, player)
+            outcome = f"eval {ev.text()}" if ev is not None else f"forced {info.get('forced')}"
             print(f"  (searched depth {info['depth_reached']}/{info['depth_requested']}, "
                   f"{info['nodes']:,} positions in {info['seconds']:.2f}s, {outcome})")
 

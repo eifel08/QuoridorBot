@@ -47,9 +47,10 @@ Every front-end lets you pick the mode before a game:
 | Think-time cap | dropdown (1 s ... no limit) | buttons | prompt |
 | Play Red (first) or Blue | dropdown | buttons | prompt |
 
-- **Human vs Human**: two people take turns on the same computer.
+- **Human vs Human**: two people take turns on the same computer. On the desktop a bot can
+  evaluate the position in the background (see [Eval display](#eval-display-desktop-window)).
 - **Human vs Bot**: you play against the alpha-beta bot. After each bot move, the depth it reached,
-  the number of positions it searched, the time it took and its score are shown (under the board in
+  the number of positions it searched, the time it took and its evaluation are shown (under the board in
   the browser, in the side panel on the desktop, after the move in the terminal).
   In the browser, *Undo* takes back your move and the bot's reply.
 - **Bot vs Bot**: two bots with independent settings play each other while you watch, or run
@@ -57,6 +58,64 @@ Every front-end lets you pick the mode before a game:
 
 Shortcuts: `python3 main.py --mode bot --depth 6 --time-limit 3 --play-as 2` skips the desktop menu
 (add `--cli` for the terminal). In the browser, `?mode=bot&depth=6` preselects the mode and depth.
+
+## Eval display (desktop window)
+
+The desktop GUI can show chess-style **evaluation bars** beside the board, filled with Red from the
+bottom and Blue from the top (Red starts at the bottom, Blue at the top). The number is the
+**backed-up search score** — the value the alpha-beta search proved for the position — not a
+static guess.
+
+| Readout | Meaning |
+|---|---|
+| `+1.5` | about one and a half steps ahead (10 engine points = 1 step of shortest-path difference; the wall reserve and tempo count in the same unit) |
+| `-0.8` | behind by 0.8 steps |
+| `M3` | forced win: reaches the goal in 3 of its own moves whatever the opponent does |
+| `-M5` | forced loss: the opponent reaches its goal in 5 of its moves whatever this side does |
+| `Won` | (Human vs Human) the game is over |
+
+Win/loss scores are ply-adjusted (`WIN - ply`), so a winning bot takes the fastest win and a losing
+bot plays the longest defence (e.g. it uses a wall to turn `-M1` into `-M2`).
+
+### Bot vs Bot
+
+Each bot has an **Eval: on/off** button in the menu (on by default). A bot's bar shows **its own**
+search score after each of its moves, written in its colour; positive means good for that bot.
+With both bots on, the bars are on **opposite sides of the board**: Red's on the left with its
+number below it, Blue's on the right with its number above it. The two bots can disagree (they
+search with their own depth, time and wall settings).
+
+```bash
+python main.py --mode bots --bot1 ab:depth=30,time=1 --bot2 ab:depth=30,time=1,walls=attack
+```
+
+### Human vs Bot
+
+**Eval: on/off** next to the colour buttons (on by default). The bot's bar appears on its side of
+the board (left if the bot is Red, right if it is Blue) and updates after each bot move. Turn it off
+if you don't want to know what the bot thinks. `--eval off` does the same from the command line.
+
+```bash
+python main.py --mode bot --depth 30 --time-limit 2 --eval on
+```
+
+### Human vs Human
+
+Off by default. In the menu choose **Show eval** and the **engine that evaluates**: the C++ engine
+with *attack only*, *attack + defense* or *all walls*, or the *Python bot*. A bot then evaluates
+every new position in the background while you think, for **at most 1 second per position**, so
+the game never waits for it. The single bar is on the left; its number is written in the colour of
+the side it favours, at that side's end of the bar (`+2.0` in Red at the bottom = Red is two steps
+ahead). The search depth and time are shown under *New game*. If the C++ engine has not been built
+the Python bot is used.
+
+```bash
+python main.py --mode human --eval-engine both
+```
+
+`--eval-engine attack|both|all|py` turns the Human vs Human eval on with that engine;
+`--eval on|off` switches the eval bars of every mode. The terminal version (`--cli`) prints each
+bot's eval after its move (`eval +1.5`, `eval M3`).
 
 ## Bot vs Bot
 
@@ -508,6 +567,7 @@ quoridor/
 notebooks/train_colab.ipynb  Google Colab notebook for cloud training
 requirements-ml.txt  torch, numpy, tensorboard (training only)
   game.py              Game engine + GameObserver hooks for views
+  evaluation.py        Eval readouts (+1.5 / M3 / -M5), background evaluator for Human vs Human
   renderer.py, cli.py  ASCII rendering and terminal front-end
   gui/
     layout.py          Pure pixel geometry (squares, grooves, wall snapping)

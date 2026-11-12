@@ -7,6 +7,7 @@ from typing import Optional
 import pygame
 
 from ..bots import make_player, make_search_bot
+from ..evaluation import EVAL_TIME_LIMIT, BackgroundEvaluator
 from ..game import Game
 from .app import QuoridorGUI, RestartGame
 from .layout import Layout
@@ -21,9 +22,14 @@ def build_players(settings: MatchSettings, gui: QuoridorGUI, names: tuple[str, s
     gui.move_delay = settings.move_delay if gui.bots_only else 0.0
     gui.paused = False
     if settings.mode == "hvh":
+        evaluator = None
+        if settings.hvh_eval:
+            evaluator = BackgroundEvaluator(settings.eval_engine, gui._analysis_result, EVAL_TIME_LIMIT)
+        gui.set_eval_display((settings.hvh_eval, False), evaluator)
         return GuiHumanPlayer(names[0], gui), GuiHumanPlayer(names[1], gui)
     if settings.mode == "bvb":
-        return tuple(GuiBotPlayer(make_player(spec, f"Bot {i + 1}: {spec.label()}"), gui)
+        gui.set_eval_display(settings.bot_evals)
+        return tuple(GuiBotPlayer(make_player(spec, f"Bot {i + 1}: {spec.label()}"), gui, settings.bot_evals[i])
                      for i, spec in enumerate(settings.bots))
     if settings.ml_model:
         from ..ml.agent import MLPlayer
@@ -32,7 +38,11 @@ def build_players(settings: MatchSettings, gui: QuoridorGUI, names: tuple[str, s
     else:
         inner = make_search_bot(f"Bot (depth {settings.depth})", settings.depth, settings.time_limit,
                                 {"wall_filter": settings.wall_filter})
-    bot = GuiBotPlayer(inner, gui)
+    bot_side = 1 - settings.human_side
+    slots = [False, False]
+    slots[bot_side] = settings.show_eval
+    gui.set_eval_display((slots[0], slots[1]))
+    bot = GuiBotPlayer(inner, gui, settings.show_eval)
     human = GuiHumanPlayer(names[settings.human_side], gui)
     return (human, bot) if settings.human_side == 0 else (bot, human)
 
@@ -60,4 +70,5 @@ def run_gui(name1: str = "Player 1", name2: str = "Player 2",
             if gui.quit_requested or not gui.restart_requested:
                 break
     finally:
+        gui.set_eval_display((False, False))  # stops the background evaluator
         pygame.quit()

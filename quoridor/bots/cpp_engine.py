@@ -286,6 +286,8 @@ class CppEngine:
             "nps": int(nodes / seconds) if seconds > 0 else 0,
             "value": value,  # engine units, for the side to move (higher is better)
             "forced": None if not decided else ("win" if value > 0 else "loss"),
+            # Half-moves until the game ends (1 = the side to move wins with this move).
+            "plies": WIN - abs(value) if decided else None,
             "move": tok[1],
         }
         return parse_move(tok[1]), info
@@ -331,12 +333,15 @@ class CppBot(AlphaBetaBot):
         if move is None:
             raise EngineError("the engine found no legal move in this position")
         info["depth_requested"] = self.depth
+        scale = int(self.options.get("dist_weight", DEFAULT_OPTIONS["dist_weight"])) or 1
         if not info["forced"]:
             # Same convention as the Python bot: own steps - opponent steps, lower is better.
-            scale = int(self.options.get("dist_weight", DEFAULT_OPTIONS["dist_weight"])) or 1
             info["score"] = -round(info["value"] / scale)
         else:
             info["score"] = None
+        # Backed-up search value in steps for the side to move (higher is better); see quoridor.evaluation.
+        searched = info["depth_reached"] > 0 and not info["forced"]
+        info["eval_steps"] = info["value"] / scale if searched else None
         self.last_info = info
         return move
 

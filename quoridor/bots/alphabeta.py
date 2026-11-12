@@ -492,6 +492,10 @@ def search_board(board: FastBoard, depth: int, time_limit: Optional[float] = Non
         # Score = own steps - opponent steps (lower is better for the bot).
         "score": -best_val if abs(best_val) < WIN - 1000 else None,
         "forced": None if abs(best_val) < WIN - 1000 else ("win" if best_val > 0 else "loss"),
+        # Backed-up search value in steps for the side to move (higher is better), or the
+        # number of half-moves to a forced win/loss; see quoridor.evaluation.
+        "eval_steps": best_val if reached and abs(best_val) < WIN - 1000 else None,
+        "plies": WIN - abs(best_val) if abs(best_val) >= WIN - 1000 else None,
     }
     return best_move, info
 

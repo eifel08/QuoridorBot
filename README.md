@@ -47,9 +47,10 @@ Every front-end lets you pick the mode before a game:
 | Think-time cap | dropdown (1 s ... no limit) | buttons | prompt |
 | Play Red (first) or Blue | dropdown | buttons | prompt |
 
-- **Human vs Human**: two people take turns on the same computer.
+- **Human vs Human**: two people take turns on the same computer. On the desktop a bot can
+  evaluate the position in the background (see [Eval display](#eval-display-desktop-window)).
 - **Human vs Bot**: you play against the alpha-beta bot. After each bot move, the depth it reached,
-  the number of positions it searched, the time it took and its score are shown (under the board in
+  the number of positions it searched, the time it took and its evaluation are shown (under the board in
   the browser, in the side panel on the desktop, after the move in the terminal).
   In the browser, *Undo* takes back your move and the bot's reply.
 - **Bot vs Bot**: two bots with independent settings play each other while you watch, or run
@@ -57,6 +58,64 @@ Every front-end lets you pick the mode before a game:
 
 Shortcuts: `python3 main.py --mode bot --depth 6 --time-limit 3 --play-as 2` skips the desktop menu
 (add `--cli` for the terminal). In the browser, `?mode=bot&depth=6` preselects the mode and depth.
+
+## Eval display (desktop window)
+
+The desktop GUI can show chess-style **evaluation bars** beside the board, filled with Red from the
+bottom and Blue from the top (Red starts at the bottom, Blue at the top). The number is the
+**backed-up search score** — the value the alpha-beta search proved for the position — not a
+static guess.
+
+| Readout | Meaning |
+|---|---|
+| `+1.5` | about one and a half steps ahead (10 engine points = 1 step of shortest-path difference; the wall reserve and tempo count in the same unit) |
+| `-0.8` | behind by 0.8 steps |
+| `M3` | forced win: reaches the goal in 3 of its own moves whatever the opponent does |
+| `-M5` | forced loss: the opponent reaches its goal in 5 of its moves whatever this side does |
+| `Won` | (Human vs Human) the game is over |
+
+Win/loss scores are ply-adjusted (`WIN - ply`), so a winning bot takes the fastest win and a losing
+bot plays the longest defence (e.g. it uses a wall to turn `-M1` into `-M2`).
+
+### Bot vs Bot
+
+Each bot has an **Eval: on/off** button in the menu (on by default). A bot's bar shows **its own**
+search score after each of its moves, written in its colour; positive means good for that bot.
+With both bots on, the bars are on **opposite sides of the board**: Red's on the left with its
+number below it, Blue's on the right with its number above it. The two bots can disagree (they
+search with their own depth, time and wall settings).
+
+```bash
+python main.py --mode bots --bot1 ab:depth=30,time=1 --bot2 ab:depth=30,time=1,walls=attack
+```
+
+### Human vs Bot
+
+**Eval: on/off** next to the colour buttons (on by default). The bot's bar appears on its side of
+the board (left if the bot is Red, right if it is Blue) and updates after each bot move. Turn it off
+if you don't want to know what the bot thinks. `--eval off` does the same from the command line.
+
+```bash
+python main.py --mode bot --depth 30 --time-limit 2 --eval on
+```
+
+### Human vs Human
+
+Off by default. In the menu choose **Show eval** and the **engine that evaluates**: the C++ engine
+with *attack only*, *attack + defense* or *all walls*, or the *Python bot*. A bot then evaluates
+every new position in the background while you think, for **at most 1 second per position**, so
+the game never waits for it. The single bar is on the left; its number is written in the colour of
+the side it favours, at that side's end of the bar (`+2.0` in Red at the bottom = Red is two steps
+ahead). The search depth and time are shown under *New game*. If the C++ engine has not been built
+the Python bot is used.
+
+```bash
+python main.py --mode human --eval-engine both
+```
+
+`--eval-engine attack|both|all|py` turns the Human vs Human eval on with that engine;
+`--eval on|off` switches the eval bars of every mode. The terminal version (`--cli`) prints each
+bot's eval after its move (`eval +1.5`, `eval M3`).
 
 ## Bot vs Bot
 
@@ -126,6 +185,9 @@ Bot 2   ab:depth=4                            67   67.0%   57.3%   76.0%    58.0
 | `ab:depth=2` | alpha-beta, depth 2 |
 | `ab:depth=8,time=2` | alpha-beta, depth 8, at most 2 s per move |
 | `ab:depth=4,random=1` | alpha-beta that picks at random between equally good moves |
+| `ab:depth=8,walls=attack` | walls the bot considers: `attack` (only walls on the opponent's shortest paths), `both` (attack + defense, default) or `all` (C++ engine) |
+| `ab:depth=30,time=1,futility=0` | C++ engine with a flag changed (flags: [engine/README.md](engine/README.md)) |
+| `ab:depth=4,engine=py` | force the Python search (`engine=cpp` forces C++; default: C++ if built) |
 | `ml:model=runs/exp1/best.pt` | trained ML agent (needs PyTorch), 64 MCTS simulations per move |
 | `ml:model=best.pt,sims=0` | ML agent playing its network's first choice without search (fast) |
 
@@ -135,7 +197,31 @@ Example, checking a trained model against the bot it was trained on:
 python3 -m quoridor.botmatch --bot1 ml:model=runs/exp1/best.pt --bot2 ab:depth=4 --games 200
 ```
 
-## The alpha-beta bot
+## The C++ search engine
+
+The bots think with a C++ engine (`engine/`) when it has been built, and with the Python search
+described in the next section otherwise. Build it once:
+
+```bash
+python build_engine.py
+```
+
+It implements the same rules, searches millions of positions per second, and adds a
+transposition table, wall filtering, decided-position cutoffs and futility pruning. With it, set a
+high depth and let the think time decide (e.g. `python main.py --mode bot --depth 30 --time-limit 2`).
+`python main.py --engine py` forces the Python search.
+
+**Walls the bot considers** (menu buttons in Human vs Bot and Bot vs Bot, a question in `--cli`,
+`--walls attack|both|all` on the command line, `walls=` in bot specs):
+
+| Choice | Walls searched | Effect |
+|---|---|---|
+| Attack only | walls that block an edge on any shortest path of the opponent | narrowest tree, deepest search; strongest at short think times in our tests |
+| Attack + defense (default) | the above, plus walls that pre-empt the opponent's blocking walls | |
+| All walls | every legal wall | widest tree, shallowest search; nothing is overlooked | Architecture, flags, benchmarks and the
+verification tools are documented in [engine/README.md](engine/README.md).
+
+## The alpha-beta bot (Python reference)
 
 Code: `quoridor/bots/alphabeta.py` (`AlphaBetaBot`), ported line by line to `web/bot.js` for the
 browser. A test checks that both versions pick the same move, with the same score and the same
@@ -365,12 +451,22 @@ versions (e.g. 3.14 on Windows), whereas plain `pygame` tries to compile from so
 fails. If you previously installed plain `pygame`, run `pip uninstall pygame` first, since the
 two can't be installed side by side.
 
+Build the C++ engine once (and again after pulling changes to `engine/`) so the bots think fast.
+It needs a C++20 compiler: g++ / clang++ on Linux and macOS (`xcode-select --install`), and on
+Windows either MinGW-w64 g++ or Visual Studio's "Desktop development with C++" (run the command
+from a "Developer Command Prompt"). Without it the bots use the slower Python search.
+
+```bash
+python build_engine.py
+```
+
 | Command | Version |
 |---|---|
 | `python3 main.py` | pygame desktop window (starts with the mode menu) |
 | `python3 main.py --p1 Alice --p2 Bob` | desktop window with names |
 | `python3 main.py --cli` | terminal (no dependencies; asks for the mode) |
 | `python3 main.py --mode bot --depth 6` | desktop window, straight into Human vs Bot |
+| `python3 main.py --mode bot --depth 30 --time-limit 3 --walls attack` | Human vs Bot, C++ engine, 3 s per move, attack walls only |
 | `python3 main.py --ml-model best.pt` | play against a trained ML agent (needs PyTorch) |
 | `python3 main.py --mode bots --bot1 ab:depth=2 --bot2 ab:depth=4` | watch Bot vs Bot |
 | `python3 -m quoridor.botmatch --games 100` | fast headless Bot vs Bot batch with statistics |
@@ -448,12 +544,15 @@ web/                   Browser version (static site, deployed to GitHub Pages)
   engine.js            JS port of the rules (checked against Python by tests)
   bot.js, bot-worker.js  JS port of the alpha-beta bot, run in a Web Worker
 .github/workflows/     Tests + GitHub Pages deployment
+engine/                C++ search engine (see engine/README.md): src/, Makefile, CMakeLists.txt
+tools/                 engine checks: parity, verify_search, bench, match
 quoridor/
   moves.py             PawnMove / WallMove / Orientation value types
   state.py             BoardState: immutable, serializable snapshot given to players
   board.py             Mutable rules engine: movement/jumps, wall validation, BFS
   player.py            Player (abstract base), CLI HumanPlayer, command parser
   bots/alphabeta.py    AlphaBetaBot: negamax alpha-beta search, heuristic, iterative deepening
+  bots/cpp_engine.py   bridge to the C++ engine: CppEngine (process), CppBot (drop-in AlphaBetaBot)
   bots/factory.py      bot spec strings ("ab:depth=4", "ml:model=...") -> players / fast policies
   botmatch.py          headless Bot vs Bot batch runner (parallel, statistics, JSON/CSV)
   ml/                  ML agent + training pipeline (PyTorch, see requirements-ml.txt)
@@ -468,6 +567,7 @@ quoridor/
 notebooks/train_colab.ipynb  Google Colab notebook for cloud training
 requirements-ml.txt  torch, numpy, tensorboard (training only)
   game.py              Game engine + GameObserver hooks for views
+  evaluation.py        Eval readouts (+1.5 / M3 / -M5), background evaluator for Human vs Human
   renderer.py, cli.py  ASCII rendering and terminal front-end
   gui/
     layout.py          Pure pixel geometry (squares, grooves, wall snapping)

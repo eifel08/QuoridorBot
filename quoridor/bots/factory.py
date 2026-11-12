@@ -6,21 +6,33 @@ Spec syntax (used by ``main.py --bot1/--bot2`` and ``python -m quoridor.botmatch
     ab:depth=2              alpha-beta, depth 2
     ab:depth=8,time=2       alpha-beta, depth 8, at most 2 s per move
     ab:depth=4,random=1     alpha-beta with random tie-breaking (varied games)
+    ab:depth=8,walls=attack walls the bot considers: attack (attack only), both (attack + defense,
+                            the default) or all (every legal wall); C++ engine only
+    ab:depth=30,time=1,futility=0,wall_filter=0
+                            C++ engine flags (see engine/README.md); ``filter`` = ``wall_filter``
+    ab:depth=4,engine=py    force the pure-Python search (``engine=cpp`` forces the C++ one)
     ml:model=best.pt        trained ML agent (needs PyTorch), 64 MCTS simulations
     ml:model=best.pt,sims=0 ML agent playing its raw policy (fast)
 
 ``alphabeta`` may be written instead of ``ab``. Unknown keys are rejected so typos
 don't go unnoticed.
+
+Alpha-beta bots run on the C++ engine when it has been built (``engine=auto``,
+the default) and on the Python search otherwise.
 """
 
 from __future__ import annotations
 
+import os
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Optional
 
 from ..player import Player
+from . import cpp_engine
 from .alphabeta import MAX_DEPTH, AlphaBetaBot, FastBoard, search_board
+from .cpp_engine import (DEFAULT_OPTIONS, DEFAULT_WALL_FILTER, make_search_bot, wall_filter_from_name,
+                         wall_mode_label)
 
 IMove = tuple[str, int]
 
@@ -33,12 +45,30 @@ class BotSpec:
     random_ties: bool = False          # alpha-beta: break ties between equal moves at random
     model: Optional[str] = None        # ml: checkpoint path
     sims: int = 64                     # ml: MCTS simulations per move
+    engine: str = "auto"               # alpha-beta: "auto" (C++ if built), "cpp" or "py"
+    options: tuple[tuple[str, int], ...] = ()  # alpha-beta: C++ engine flags, e.g. (("futility", 0),)
+
+    @property
+    def wall_filter(self) -> int:
+        """Walls the search considers: 2 = attack only, 1 = attack + defense, 0 = all."""
+        return dict(self.options).get("wall_filter", DEFAULT_WALL_FILTER)
+
+    def with_wall_filter(self, value: int) -> "BotSpec":
+        opts = [(k, v) for k, v in self.options if k != "wall_filter"]
+        if value != DEFAULT_WALL_FILTER:
+            opts.append(("wall_filter", int(value)))
+        order = list(DEFAULT_OPTIONS)
+        return replace(self, options=tuple(sorted(opts, key=lambda kv: order.index(kv[0]))))
+
+    def uses_cpp(self) -> bool:
+        return self.kind == "ab" and cpp_engine.resolve_engine(self.engine) == "cpp"
 
     def label(self) -> str:
         if self.kind == "ml":
             return f"ML ({self.sims} sims)"
         t = f", {self.time_limit:g}s" if self.time_limit else ""
-        return f"Alpha-beta d{self.depth}{t}"
+        w = f", {wall_mode_label(self.wall_filter).lower()}" if self.wall_filter != DEFAULT_WALL_FILTER else ""
+        return f"Alpha-beta d{self.depth}{t}{w}"
 
     def to_string(self) -> str:
         if self.kind == "ml":
@@ -48,6 +78,9 @@ class BotSpec:
             parts.append(f"time={self.time_limit:g}")
         if self.random_ties:
             parts.append("random=1")
+        if self.engine != "auto":
+            parts.append(f"engine={self.engine}")
+        parts += [f"{k}={v}" for k, v in self.options]
         return "ab:" + ",".join(parts)
 
 
@@ -65,7 +98,14 @@ def parse_bot_spec(text: str) -> BotSpec:
             raise ValueError(f"expected key=value, got '{item}'")
         opts[key.strip().lower()] = value.strip()
 
-    allowed = {"ab": {"depth", "time", "random"}, "ml": {"model", "sims"}}[kind]
+    if "filter" in opts:
+        opts["wall_filter"] = opts.pop("filter")
+    if "walls" in opts and kind == "ab":
+        try:
+            opts["wall_filter"] = str(wall_filter_from_name(opts.pop("walls")))
+        except ValueError as exc:
+            raise ValueError(f"bad bot spec '{text}': {exc}") from None
+    allowed = {"ab": {"depth", "time", "random", "engine", *DEFAULT_OPTIONS}, "ml": {"model", "sims"}}[kind]
     unknown = set(opts) - allowed
     if unknown:
         raise ValueError(f"unknown option(s) for '{kind}': {', '.join(sorted(unknown))} "
@@ -77,7 +117,13 @@ def parse_bot_spec(text: str) -> BotSpec:
                 raise ValueError(f"depth must be 1-{MAX_DEPTH}")
             t = float(opts.get("time", 0)) or None
             rnd = opts.get("random", "0").lower() in ("1", "true", "yes")
-            return BotSpec("ab", depth=depth, time_limit=t, random_ties=rnd)
+            engine = opts.get("engine", "auto").lower()
+            if engine not in ("auto", "cpp", "py"):
+                raise ValueError("engine must be auto, cpp or py")
+            flags = tuple((k, int(opts[k])) for k in DEFAULT_OPTIONS if k in opts)
+            if flags and engine == "py":
+                raise ValueError("engine flags need the C++ engine")
+            return BotSpec("ab", depth=depth, time_limit=t, random_ties=rnd, engine=engine, options=flags)
         if "model" not in opts:
             raise ValueError("ml bots need model=PATH")
         return BotSpec("ml", model=opts["model"], sims=int(opts.get("sims", 64)))
@@ -92,7 +138,7 @@ def make_player(spec: BotSpec, name: Optional[str] = None) -> Player:
         from ..ml.agent import MLPlayer
 
         return MLPlayer(spec.model, name, spec.sims)  # type: ignore[arg-type]
-    bot = AlphaBetaBot(name, spec.depth, spec.time_limit)
+    bot = make_search_bot(name, spec.depth, spec.time_limit, dict(spec.options), spec.engine)
     if spec.random_ties:
         bot.rng = random.Random()
     return bot
@@ -111,4 +157,24 @@ def make_policy(spec: BotSpec, seed: int = 0) -> Callable[[FastBoard], IMove]:
         rng = np.random.default_rng(seed)
         return lambda board: agent_move(ev, board, spec.sims, 0.0, rng)[0]
     rng = random.Random(seed) if spec.random_ties else None
+    if spec.uses_cpp():
+        # Like the Python policy this is stateless: the transposition table is
+        # cleared before every move, so results do not depend on earlier games.
+        options = {"hash_mb": 8, **dict(spec.options)}
+        if rng is not None:
+            options.setdefault("seed", rng.getrandbits(31) | 1)
+        engines: dict[int, cpp_engine.CppEngine] = {}  # one per process (botmatch forks workers)
+
+        def policy(board: FastBoard) -> IMove:
+            engine = engines.get(os.getpid())
+            if engine is None:
+                engine = engines[os.getpid()] = cpp_engine.CppEngine(options=options)
+            engine.new_game()
+            engine.set_position(board)
+            move, _ = engine.go(spec.depth, spec.time_limit)
+            if move is None:
+                raise cpp_engine.EngineError("the engine found no legal move")
+            return cpp_engine.to_imove(move)
+
+        return policy
     return lambda board: search_board(board, spec.depth, spec.time_limit, rng)[0]

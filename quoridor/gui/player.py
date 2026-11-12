@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 
+from ..evaluation import Eval
 from ..moves import Move
 from ..player import Player
 from ..state import BoardState
@@ -36,10 +37,11 @@ class GuiBotPlayer(Player):
     The wrapped bot only ever sees the immutable ``BoardState``.
     """
 
-    def __init__(self, bot: Player, gui: QuoridorGUI) -> None:
+    def __init__(self, bot: Player, gui: QuoridorGUI, show_eval: bool = False) -> None:
         super().__init__(bot.name)
         self.bot = bot
         self.gui = gui
+        self.show_eval = show_eval  # draw this bot's search score in its eval bar
 
     def set_index(self, index: int) -> None:
         super().set_index(index)
@@ -60,4 +62,6 @@ class GuiBotPlayer(Player):
         if "error" in result:
             raise result["error"]
         self.gui.bot_info = getattr(self.bot, "last_info", None)
+        if self.show_eval:
+            self.gui.set_bot_eval(self.index, Eval.from_info(self.gui.bot_info, self.index, self.name))
         return result["move"]

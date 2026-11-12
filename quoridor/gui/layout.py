@@ -23,7 +23,7 @@ class Layout:
     """Pixel geometry of the window."""
 
     def __init__(self, cell: int = 52, gap: int = 14, margin: int = 40, frame: int = 14,
-                 panel_width: int = 280, size: int = BOARD_SIZE) -> None:
+                 panel_width: int = 280, size: int = BOARD_SIZE, eval_bar: int = 16) -> None:
         self.n = size
         self.cell = cell
         self.gap = gap
@@ -31,14 +31,29 @@ class Layout:
         self.margin = margin
         self.frame = frame
         self.board_px = size * cell + (size - 1) * gap
-        self.ox = margin + frame
-        self.oy = margin + frame
         frame_px = self.board_px + 2 * frame
-        self.frame_rect: Rect = (margin, margin, frame_px, frame_px)
-        self.panel_x = margin + frame_px + 32
+        # Left of the board: [eval bar of Red / analysis] [row numbers] [board].
+        left = 18
+        self.frame_x = left + eval_bar + 32
+        self.row_label_x = self.frame_x - 16
+        self.ox = self.frame_x + frame
+        self.oy = margin + frame
+        self.frame_rect: Rect = (self.frame_x, margin, frame_px, frame_px)
+        frame_right = self.frame_x + frame_px
+        # Eval bars on opposite sides of the board: slot 0 (Red) left, slot 1 (Blue) right.
+        self.eval_bar_rects: tuple[Rect, Rect] = (
+            (left, margin, eval_bar, frame_px),
+            (frame_right + 14, margin, eval_bar, frame_px),
+        )
+        self.panel_x = frame_right + 14 + eval_bar + 16
         self.panel_width = panel_width
         self.width = self.panel_x + panel_width + margin
         self.height = 2 * margin + frame_px
+        # Eval readouts: Red's below its bar (Red starts at the bottom), Blue's above its bar.
+        self.eval_text_pos = (
+            (left + eval_bar / 2, self.height - margin / 2),
+            (frame_right + 14 + eval_bar / 2, margin / 2),
+        )
 
         # Player cards in the side panel: Player 2 (top of board) at the
         # top, Player 1 (bottom of board) at the bottom.

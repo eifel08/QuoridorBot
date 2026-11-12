@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.16)
+project(quoridor_engine CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
+if(NOT MSVC)
+  set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
+  add_compile_options(-Wall -Wextra)
+endif()
+
+add_executable(quoridor_engine src/board.cpp src/search.cpp src/main.cpp)

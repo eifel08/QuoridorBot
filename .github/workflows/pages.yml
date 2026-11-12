@@ -28,6 +28,7 @@ jobs:
         with:
           node-version: "20"
       - run: pip install -r requirements.txt numpy   # torch-free ML tests run; the rest skip without torch
+      - run: make -C engine   # C++ search engine (tests/test_cpp_engine.py skips without it)
       - run: python -m unittest -v
 
   deploy:

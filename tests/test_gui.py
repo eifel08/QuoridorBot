@@ -171,3 +171,22 @@ class TestModeSetup(unittest.TestCase):
         self.assertEqual(gui.move_delay, 0.25)
         build_players(MatchSettings("hvh"), gui, ("A", "B"))
         self.assertFalse(gui.bots_only)
+
+    def test_wall_mode_buttons(self):
+        from quoridor.bots import BotSpec
+        from quoridor.bots.cpp_engine import WALL_MODES
+        from quoridor.gui import MatchSettings, QuoridorGUI
+        from quoridor.gui.menu import Menu
+        menu = Menu(QuoridorGUI())
+        s = MatchSettings("hvb")
+        self.assertEqual(s.wall_filter, 1)  # attack + defense by default
+        for (_, value, _), rect in zip(WALL_MODES, menu.wall_rects):
+            s = menu._click(s, rect.center)
+            self.assertEqual(s.wall_filter, value)
+        s = MatchSettings("bvb", bots=(BotSpec(depth=2), BotSpec(depth=4)))
+        s = menu._click(s, menu.bot_wall_rects[0][0].center)  # Bot 1: attack only
+        s = menu._click(s, menu.bot_wall_rects[1][2].center)  # Bot 2: all walls
+        self.assertEqual((s.bots[0].wall_filter, s.bots[1].wall_filter), (2, 0))
+        self.assertEqual((s.bots[0].depth, s.bots[1].depth), (2, 4))
+        menu.draw(s)  # both screens draw without errors
+        menu.draw(MatchSettings("hvb"))

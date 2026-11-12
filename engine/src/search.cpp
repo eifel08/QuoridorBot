@@ -14,11 +14,16 @@ constexpr uint64_t COL0 = 0x0101010101010101ULL;
 constexpr uint64_t COL7 = 0x8080808080808080ULL;
 
 // Ordering scores of the "everything after the shortest-path pawn moves" stage.
-constexpr int32_t SCORE_KILLER = 3 << 26;
-constexpr int32_t SCORE_GAIN = 1 << 26;       // walls that lengthen the opponent's path
+// Moves are tried tier by tier: killers, attack walls, defense walls, then the
+// rest (other walls and pawn moves that do not shorten my path). Inside a tier:
+// most steps added to the opponent's path, fewest added to mine, then history.
+constexpr int32_t SCORE_KILLER = 0x70000000;
+constexpr int32_t TIER_ATTACK = 0x40000000;   // blocks an edge on a shortest path of the opponent
+constexpr int32_t TIER_DEFENSE = 0x20000000;  // pre-empts a wall that would block one of my shortest paths
 constexpr int32_t SCORE_PER_STEP = 1 << 18;   // per step added to the opponent's path
 constexpr int32_t SCORE_OWN_STEP = 1 << 14;   // per step added to my own path (penalty)
 constexpr int32_t HISTORY_MAX = SCORE_OWN_STEP - 1;
+constexpr int32_t SCORE_ROOT_PAWN = 0x7FFFFF00;  // ordered_moves(): shortest-path pawn moves first
 
 // Win scores are stored relative to the node ("win in k plies from here") so
 // that an entry stays correct when the position is reached at another ply.
@@ -153,18 +158,21 @@ int Search::gen_walls(int me, int d_me, int d_opp, const GoalLayers& gl_me, int 
     const PathCut cut_me = board.shortest_path_cuts(me, gl_me);
     const uint64_t free_h = board.free_h(), free_v = board.free_v();
 
+    // Attack: walls that block an edge on any of the opponent's shortest paths.
+    const uint64_t att_h = cut_opp.h & free_h, att_v = cut_opp.v & free_v;
+    // Defense: walls that overlap or cross a wall the opponent could use to
+    // block an edge on any of my shortest paths.
+    const uint64_t th = cut_me.h & free_h, tv = cut_me.v & free_v;
+    const uint64_t def_h = (((th & ~COL7) << 1) | ((th & ~COL0) >> 1) | tv) & free_h;
+    const uint64_t def_v = ((tv << NW) | (tv >> NW) | th) & free_v;
+
     uint64_t cand_h = free_h, cand_v = free_v;
-    if (filter != FILTER_OFF) {
-        // Attack: walls that block an edge on any of the opponent's shortest paths.
-        cand_h &= cut_opp.h;
-        cand_v &= cut_opp.v;
-        if (filter == FILTER_ATTACK_DEFENSE) {
-            // Defense: walls that overlap or cross a wall the opponent could
-            // use to block an edge on any of my shortest paths.
-            const uint64_t th = cut_me.h & free_h, tv = cut_me.v & free_v;
-            cand_h |= (((th & ~COL7) << 1) | ((th & ~COL0) >> 1) | tv) & free_h;
-            cand_v |= ((tv << NW) | (tv >> NW) | th) & free_v;
-        }
+    if (filter == FILTER_ATTACK_ONLY) {
+        cand_h = att_h;
+        cand_v = att_v;
+    } else if (filter == FILTER_ATTACK_DEFENSE) {
+        cand_h = att_h | def_h;
+        cand_v = att_v | def_v;
     }
 
     int n = 0;
@@ -185,8 +193,9 @@ int Search::gen_walls(int me, int d_me, int d_opp, const GoalLayers& gl_me, int 
             }
             const int gain = nd_opp - d_opp, loss = nd_me - d_me;
             int32_t s = cfg.history ? history_[me][m] : 0;
-            s -= loss * SCORE_OWN_STEP;
-            if (gain > 0) s += SCORE_GAIN + gain * SCORE_PER_STEP;
+            s += gain * SCORE_PER_STEP - loss * SCORE_OWN_STEP;
+            if ((hits_opp >> a) & 1) s += TIER_ATTACK;
+            else if (((o == 0 ? def_h : def_v) >> a) & 1) s += TIER_DEFENSE;
             out[n++] = Cand{s, m, uint8_t(nd_me), uint8_t(nd_opp)};
         }
     }
@@ -331,7 +340,8 @@ int Search::negamax(int depth, int alpha, int beta, int ply, int d_me, int d_opp
         int n = 0;
         for (int i = 0; i < npawn; ++i)
             if (pd[i] >= d_me && pm[i] != tt_move)
-                cand[n++] = Cand{cfg.history ? history_[me][pm[i]] : 0, pm[i], uint8_t(pd[i]), uint8_t(d_opp)};
+                cand[n++] = Cand{(cfg.history ? history_[me][pm[i]] : 0) - (pd[i] - d_me) * SCORE_OWN_STEP, pm[i],
+                                 uint8_t(pd[i]), uint8_t(d_opp)};
         if (board.walls_left[me] > 0) {
             int nw = gen_walls(me, d_me, d_opp, gl_me, cfg.wall_filter, cand + n);
             // Never let the filter leave a player without any move.
@@ -427,7 +437,7 @@ void Search::ordered_moves(MoveList& out) {
     int n = 0;
     for (int i = 0; i < npawn; ++i) {
         const int d = gl_me.dist(pm[i]);
-        cand[n++] = Cand{d < d_me ? SCORE_KILLER * 2 - d : 0, pm[i], uint8_t(d), uint8_t(d_opp)};
+        cand[n++] = Cand{d < d_me ? SCORE_ROOT_PAWN - d : 0, pm[i], uint8_t(d), uint8_t(d_opp)};
     }
     if (board.walls_left[me] > 0) {
         int nw = gen_walls(me, d_me, d_opp, gl_me, cfg.wall_filter, cand + n);

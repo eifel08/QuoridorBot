@@ -100,10 +100,14 @@ The cost is one pipe round trip per move (well under a millisecond), irrelevant 
   flag, age) in buckets of two, slot 0 depth-preferred, slot 1 always replaced. A stored value is
   used only if its depth >= the remaining depth, respecting EXACT/LOWER/UPPER; the stored move is
   always tried first. Win scores are stored relative to the node so they stay correct at another ply.
-* **Move ordering**: (1) TT move, (2) pawn moves along a shortest path, (3) killer moves, then walls
-  sorted by how much they lengthen the opponent's path (minus what they cost me), then everything
-  else by the history heuristic. The stages are lazy: walls are only generated if the TT move and
-  the shortest-path pawn moves did not already cause a cutoff.
+* **Move ordering**: (1) TT move, (2) pawn moves along a shortest path, (3) killer moves, then
+  (4) attack walls, (5) defense walls, (6) everything else (other walls, pawn moves that do not
+  shorten my path). Inside each tier: most steps added to the opponent's path first, then fewest
+  steps added to mine, then the history heuristic. With `wall_filter=0` the attack and defense
+  walls are therefore still searched before the rest. The stages are lazy: walls are only
+  generated if the TT move and the shortest-path pawn moves did not already cause a cutoff.
+  Ordering only changes speed, never the result: alpha-beta returns the minimax value whatever
+  the order (checked by `tools.verify_search`).
 * The shortest-path lengths of both players are passed down the tree (a pawn move's new distance
   is read from the goal flood, a wall's from its legality check), so leaf nodes do no BFS at all.
 * **Win/loss scores** are `WIN - ply` / `-WIN + ply`: faster wins and slower losses are preferred.
@@ -261,6 +265,22 @@ the C++ engine wins **34 of 40 games (85%)**, 75% as Red and 95% as Blue.
 `tempo_bonus` makes no measurable difference at a fixed depth (every leaf of one iteration has the
 same side to move, so it shifts all scores equally); it only matters when comparing positions at
 different depths through the TT.
+
+### Wall modes at a fixed depth (no time limit)
+
+`tools.match --depth D`, same seed per row; "A wins" counts decisive games (draws = move cap).
+
+| Depth | All vs Attack + defense | Attack + defense vs Attack only | All vs Attack only | Nodes per move (all / both / attack) |
+|---|---|---|---|---|
+| 4 | 51.3% | 52.0% | 51.0% | 16.9 k / 2.2 k / 0.4 k |
+| 5 | 47.0% | 49.7% | 52.0% | 84 k / 8.4-9.1 k / 1.1 k |
+| 6 | 52.0% | 51.0% | - | 364 k / 25-29 k / 3.8 k |
+
+At the same depth the wider modes are at most slightly stronger: every result is within the 95%
+noise band of a few hundred games. Each wider mode sees a superset of the walls, so it is never
+worse in principle, but walls that do not cut a shortest path rarely change the best move within
+a 4-6 ply horizon. It costs roughly 8-10x more nodes per step up, so with a time limit the
+narrower modes reach deeper and win (see the table above).
 
 Note that at short time controls **attack-only filtering** (`wall_filter=2`) is clearly stronger
 than the attack + defense default: the extra depth is worth more than the defensive walls it

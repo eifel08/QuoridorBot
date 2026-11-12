@@ -137,6 +137,21 @@ class TestWallFilter(EngineCase):
             self.engine.set_position(pos)
             self.assertEqual(set(self.engine.search_order()), legal, pos)
 
+    def test_walls_are_ordered_attack_defense_other(self):
+        rng = random.Random(8)
+        for _ in range(25):
+            pos = random_position(self.engine, rng, rng.randint(2, 40))
+            self.engine.set_position(pos)
+            tiers = {}
+            for value in (2, 1, 0):  # attack only, attack + defense, all
+                self.engine.set_option("wall_filter", value)
+                self.engine.set_position(pos)
+                tiers[value] = [m for m in self.engine.search_order() if isinstance(m, WallMove)]
+            attack, both, every = set(tiers[2]), set(tiers[1]), tiers[0]
+            rank = [0 if m in attack else 1 if m in both else 2 for m in every]
+            self.assertEqual(rank, sorted(rank), pos)  # all-walls mode: attack, then defense, then the rest
+            self.assertEqual([m for m in tiers[1] if m in attack], tiers[2], pos)  # same order inside a tier
+
     def test_opening_filter(self):
         self.engine.set_position(Board().snapshot(0))
         moves = self.engine.search_order()

@@ -24,6 +24,11 @@ struct Config {
     int dist_weight = 10;  // per step of shortest-path difference
     int wall_weight = 16;  // per wall of reserve difference
     int tempo_bonus = 5;   // side to move is effectively half a step ahead
+    // Dynamic wall value: a player can only place walls on its own turns before the
+    // opponent arrives, so its reserve counts for at most (opponent's distance + slack)
+    // walls. Surplus walls are worthless in a race that is about to end.
+    bool wall_cap = true;
+    int wall_cap_slack = 1;
 
     // ---- search features ----
     bool use_tt = true;           // transposition table

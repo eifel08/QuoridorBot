@@ -101,9 +101,13 @@ void Search::tt_store(uint64_t key, int depth, int value, int flag, Move move) {
 // Evaluation (Step 4), from the side to move's point of view.
 // --------------------------------------------------------------------------
 int Search::evaluate(int me, int d_me, int d_opp) const {
-    return (d_opp - d_me) * cfg.dist_weight +
-           (int(board.walls_left[me]) - int(board.walls_left[me ^ 1])) * cfg.wall_weight +
-           cfg.tempo_bonus;
+    int my_walls = board.walls_left[me], opp_walls = board.walls_left[me ^ 1];
+    if (cfg.wall_cap) {
+        // I can use at most one wall per turn I still get before the opponent arrives.
+        my_walls = std::min(my_walls, d_opp + cfg.wall_cap_slack);
+        opp_walls = std::min(opp_walls, d_me + cfg.wall_cap_slack);
+    }
+    return (d_opp - d_me) * cfg.dist_weight + (my_walls - opp_walls) * cfg.wall_weight + cfg.tempo_bonus;
 }
 
 // --------------------------------------------------------------------------

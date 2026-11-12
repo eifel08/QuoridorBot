@@ -545,7 +545,7 @@ web/                   Browser version (static site, deployed to GitHub Pages)
   bot.js, bot-worker.js  JS port of the alpha-beta bot, run in a Web Worker
 .github/workflows/     Tests + GitHub Pages deployment
 engine/                C++ search engine (see engine/README.md): src/, Makefile, CMakeLists.txt
-tools/                 engine checks: parity, verify_search, bench, match
+tools/                 engine checks: parity, verify_search, bench, match, calibration, eval_accuracy
 quoridor/
   moves.py             PawnMove / WallMove / Orientation value types
   state.py             BoardState: immutable, serializable snapshot given to players

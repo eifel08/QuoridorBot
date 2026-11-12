@@ -41,7 +41,7 @@ OptionValue = Union[int, bool]
 
 #: Engine options and their defaults (``set <name> <value>``); see engine/README.md.
 DEFAULT_OPTIONS: dict[str, int] = {
-    "dist_weight": 10, "wall_weight": 16, "tempo_bonus": 5,
+    "dist_weight": 10, "wall_weight": 16, "tempo_bonus": 5, "wall_cap": 1, "wall_cap_slack": 1,
     "tt": 1, "tt_exact_depth": 0, "alphabeta": 1, "killers": 1, "history": 1,
     "wall_filter": 1, "decided": 1, "decided_margin": 1,
     "futility": 1, "wall_recovery": 5, "depth_margin": 5,

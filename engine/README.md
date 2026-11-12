@@ -54,7 +54,7 @@ engine/src/board.h, board.cpp    position, make/unmake, BFS, legal moves, Zobris
 engine/src/search.h, search.cpp  negamax, TT, move ordering, filtering, pruning, evaluation
 engine/src/main.cpp              text protocol on stdin/stdout, self-test
 quoridor/bots/cpp_engine.py      Python side: CppEngine (process wrapper), CppBot (a Player)
-tools/                           parity, verify_search, bench, match
+tools/                           parity, verify_search, bench, match, calibration, eval_accuracy
 tests/test_cpp_engine.py         unit tests (skipped if the engine is not built)
 ```
 
@@ -129,10 +129,17 @@ If the filter leaves a player without any move, all legal walls are generated.
 ### Evaluation
 
 ```
-eval = (opp_dist - my_dist) * dist_weight + (my_walls - opp_walls) * wall_weight + tempo_bonus
+eval = (opp_dist - my_dist) * dist_weight + (my_walls' - opp_walls') * wall_weight + tempo_bonus
+
+my_walls'  = min(my_walls,  opp_dist + wall_cap_slack)     (with wall_cap on, the default)
+opp_walls' = min(opp_walls, my_dist  + wall_cap_slack)
 ```
 
-from the side to move's point of view.
+from the side to move's point of view. **Dynamic wall value**: a player can place at most one wall
+per turn, and only on the turns it still gets before the opponent arrives, so a reserve only counts
+up to the opponent's remaining distance (+1 turn of slack). Example: Red 4 steps from its goal with
+6 walls, Blue 2 steps away with none: the old formula counted all 6 walls (+8.1 steps for Red), the
+capped one counts 3 (+3.3). Far from the goal the cap changes nothing.
 
 ### Decided positions (`decided`)
 
@@ -165,6 +172,8 @@ Set with `set <name> <value>` in the protocol, `CppBot(options={...})`, bot spec
 | `dist_weight` | 10 | evaluation: per step of path difference |
 | `wall_weight` | 16 | evaluation: per wall of reserve difference |
 | `tempo_bonus` | 5 | evaluation: bonus for the side to move |
+| `wall_cap` | 1 | evaluation: count a wall reserve only up to the opponent's distance + slack |
+| `wall_cap_slack` | 1 | extra turns allowed by the cap |
 | `wall_filter` | 1 | 0 = all legal walls, 1 = attack + defense walls, 2 = attack walls only |
 | `decided` | 1 | decided-position cutoffs |
 | `decided_margin` | 1 | extra lead required when the pawns can still meet |
@@ -261,6 +270,25 @@ the C++ engine wins **34 of 40 games (85%)**, 75% as Red and 95% as Blue.
 | `wall_filter=2` (attack only) | `wall_filter=1` | 75.5% (depth 10.7 vs 8.5) |
 | `decided=1` | `decided=0` | 53.0% (within noise) |
 | `wall_weight=16` | `wall_weight=8` / `12` / `20` / `24` (depth 5) | 64% / 61% / 53% / 59% |
+
+### Wall weight and the dynamic wall value (0.05 s per move, colours alternated)
+
+| A | B | A wins |
+|---|---|---|
+| `wall_cap=1,wall_cap_slack=1` (weight 16) | no cap (weight 16) | **69.5%** (400 games) |
+| `wall_cap=1,wall_cap_slack=0` (weight 16) | no cap (weight 16) | 57.5% (400 games) |
+| cap, slack 2 | cap, slack 1 | 46.8% (400 games) |
+| cap + slack 1, weight 20 / 12 | cap + slack 1, weight 16 | 48.2% / 34.8% (400 games) |
+| weight 6 / 10 (no cap) | weight 16 (no cap) | 33.0% / 46.5% (200 games) |
+
+Lowering the wall weight was tried to stop the eval from overrating a big wall reserve in a race
+the opponent is about to win. It made the bots clearly weaker and did not make the eval more
+accurate: on 500 fixed positions labelled with their real winner (`python -m tools.eval_accuracy`)
+every weight from 3 to 16 predicts the winner about 80% of the time, and on the race positions
+where weight 16 wrongly claimed a win, weight 6 showed the same scores. The dynamic cap removes
+exactly the surplus walls a player cannot use before the race ends, keeps the weight that plays
+best, and wins 69.5% against the uncapped evaluation. `python -m tools.calibration` measures how
+often a bot's own eval claims a win it then loses in self-play.
 
 `tempo_bonus` makes no measurable difference at a fixed depth (every leaf of one iteration has the
 same side to move, so it shifts all scores equally); it only matters when comparing positions at

@@ -94,6 +94,8 @@ bool set_option(Search& s, const std::string& name, const std::string& value, st
     if (name == "dist_weight") c.dist_weight = int(v);
     else if (name == "wall_weight") c.wall_weight = int(v);
     else if (name == "tempo_bonus") c.tempo_bonus = int(v);
+    else if (name == "wall_cap") c.wall_cap = v != 0;
+    else if (name == "wall_cap_slack") c.wall_cap_slack = int(v);
     else if (name == "tt") c.use_tt = v != 0;
     else if (name == "tt_exact_depth") c.tt_exact_depth = v != 0;
     else if (name == "alphabeta") c.alphabeta = v != 0;

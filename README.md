@@ -126,6 +126,8 @@ Bot 2   ab:depth=4                            67   67.0%   57.3%   76.0%    58.0
 | `ab:depth=2` | alpha-beta, depth 2 |
 | `ab:depth=8,time=2` | alpha-beta, depth 8, at most 2 s per move |
 | `ab:depth=4,random=1` | alpha-beta that picks at random between equally good moves |
+| `ab:depth=30,time=1,futility=0` | C++ engine with a flag changed (flags: [engine/README.md](engine/README.md)) |
+| `ab:depth=4,engine=py` | force the Python search (`engine=cpp` forces C++; default: C++ if built) |
 | `ml:model=runs/exp1/best.pt` | trained ML agent (needs PyTorch), 64 MCTS simulations per move |
 | `ml:model=best.pt,sims=0` | ML agent playing its network's first choice without search (fast) |
 
@@ -135,7 +137,22 @@ Example, checking a trained model against the bot it was trained on:
 python3 -m quoridor.botmatch --bot1 ml:model=runs/exp1/best.pt --bot2 ab:depth=4 --games 200
 ```
 
-## The alpha-beta bot
+## The C++ search engine
+
+The bots think with a C++ engine (`engine/`) when it has been built, and with the Python search
+described in the next section otherwise. Build it once:
+
+```bash
+python -m quoridor.bots.cpp_engine build
+```
+
+It implements the same rules, searches millions of positions per second, and adds a
+transposition table, wall filtering, decided-position cutoffs and futility pruning. With it, set a
+high depth and let the think time decide (e.g. `python main.py --mode bot --depth 30 --time-limit 2`).
+`python main.py --engine py` forces the Python search. Architecture, flags, benchmarks and the
+verification tools are documented in [engine/README.md](engine/README.md).
+
+## The alpha-beta bot (Python reference)
 
 Code: `quoridor/bots/alphabeta.py` (`AlphaBetaBot`), ported line by line to `web/bot.js` for the
 browser. A test checks that both versions pick the same move, with the same score and the same
@@ -448,12 +465,15 @@ web/                   Browser version (static site, deployed to GitHub Pages)
   engine.js            JS port of the rules (checked against Python by tests)
   bot.js, bot-worker.js  JS port of the alpha-beta bot, run in a Web Worker
 .github/workflows/     Tests + GitHub Pages deployment
+engine/                C++ search engine (see engine/README.md): src/, Makefile, CMakeLists.txt
+tools/                 engine checks: parity, verify_search, bench, match
 quoridor/
   moves.py             PawnMove / WallMove / Orientation value types
   state.py             BoardState: immutable, serializable snapshot given to players
   board.py             Mutable rules engine: movement/jumps, wall validation, BFS
   player.py            Player (abstract base), CLI HumanPlayer, command parser
   bots/alphabeta.py    AlphaBetaBot: negamax alpha-beta search, heuristic, iterative deepening
+  bots/cpp_engine.py   bridge to the C++ engine: CppEngine (process), CppBot (drop-in AlphaBetaBot)
   bots/factory.py      bot spec strings ("ab:depth=4", "ml:model=...") -> players / fast policies
   botmatch.py          headless Bot vs Bot batch runner (parallel, statistics, JSON/CSV)
   ml/                  ML agent + training pipeline (PyTorch, see requirements-ml.txt)

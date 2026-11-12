@@ -6,7 +6,7 @@ from typing import Optional
 
 import pygame
 
-from ..bots import AlphaBetaBot, make_player
+from ..bots import make_player, make_search_bot
 from ..game import Game
 from .app import QuoridorGUI, RestartGame
 from .layout import Layout
@@ -30,7 +30,7 @@ def build_players(settings: MatchSettings, gui: QuoridorGUI, names: tuple[str, s
 
         inner = MLPlayer(settings.ml_model, "ML agent", settings.ml_sims)
     else:
-        inner = AlphaBetaBot(f"Bot (depth {settings.depth})", settings.depth, settings.time_limit)
+        inner = make_search_bot(f"Bot (depth {settings.depth})", settings.depth, settings.time_limit)
     bot = GuiBotPlayer(inner, gui)
     human = GuiHumanPlayer(names[settings.human_side], gui)
     return (human, bot) if settings.human_side == 0 else (bot, human)

@@ -41,6 +41,9 @@ def main() -> None:
     parser.add_argument("--depth", type=int, default=4, help="bot search depth 1-30 (default 4)")
     parser.add_argument("--time-limit", type=float, default=5.0,
                         help="bot think time per move in seconds, 0 = no limit (default 5)")
+    parser.add_argument("--engine", choices=["auto", "cpp", "py"], default=None,
+                        help="bot search engine: C++ (engine/, must be built), pure Python, or auto = "
+                             "C++ if built (default)")
     parser.add_argument("--play-as", type=int, choices=[1, 2], default=1,
                         help="against the bot: play as Player 1 (moves first) or 2")
     parser.add_argument("--ml-model", help="trained checkpoint (.pt): the bot is the ML agent (needs PyTorch)")
@@ -60,6 +63,12 @@ def main() -> None:
         parser.error(f"unrecognized arguments: {' '.join(extra)}")
     if not 1 <= args.depth <= 30:
         parser.error("--depth must be between 1 and 30")
+    if args.engine:
+        from quoridor.bots import cpp_engine
+
+        cpp_engine.default_engine = args.engine
+        if args.engine == "cpp" and not cpp_engine.engine_available():
+            parser.error("the C++ engine is not built; run: python -m quoridor.bots.cpp_engine build")
     mode = {"human": "hvh", "bot": "hvb", "bots": "bvb", None: None}[args.mode]
     time_limit = args.time_limit or None
     if args.ml_model and mode is None:

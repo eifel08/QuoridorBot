@@ -107,7 +107,7 @@ class BotInfoView(GameObserver):
 def run_cli(mode: Optional[str] = None, depth: int = 4, time_limit: Optional[float] = 5.0,
             human_side: int = 0, ml_model: Optional[str] = None, ml_sims: int = 64,
             bot_specs=None, move_delay: float = 0.5) -> None:
-    from .bots import AlphaBetaBot, BotSpec, make_player
+    from .bots import BotSpec, make_player, make_search_bot
 
     print("=== Quoridor ===")
     print("Player 1 [1] starts at the bottom (row 8) and must reach row 0.")
@@ -135,7 +135,7 @@ def run_cli(mode: Optional[str] = None, depth: int = 4, time_limit: Optional[flo
 
                 bot = MLPlayer(ml_model, "ML agent", ml_sims)
             else:
-                bot = AlphaBetaBot(f"Bot (depth {depth})", depth, time_limit)
+                bot = make_search_bot(f"Bot (depth {depth})", depth, time_limit)
             players = (human, bot) if human_side == 0 else (bot, human)
         else:
             print(HELP_TEXT)

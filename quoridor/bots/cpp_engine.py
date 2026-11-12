@@ -8,7 +8,7 @@ pure-Python :class:`~quoridor.bots.alphabeta.AlphaBetaBot`.
 
 Build the engine first (see ``engine/README.md``)::
 
-    python -m quoridor.bots.cpp_engine build
+    python build_engine.py
 
 The executable is looked up in ``$QUORIDOR_ENGINE`` and then in
 ``engine/build``. If it is missing, :func:`make_search_bot` falls back to the
@@ -47,6 +47,35 @@ DEFAULT_OPTIONS: dict[str, int] = {
     "futility": 1, "wall_recovery": 5, "depth_margin": 5,
     "seed": 0, "hash_mb": 64,
 }
+
+
+#: Which walls the search considers (engine option ``wall_filter``), in menu order:
+#: (name used in specs / --walls, wall_filter value, label).
+WALL_MODES: tuple[tuple[str, int, str], ...] = (
+    ("attack", 2, "Attack only"),
+    ("both", 1, "Attack + defense"),
+    ("all", 0, "All walls"),
+)
+DEFAULT_WALL_FILTER = 1
+
+
+def wall_filter_from_name(name: str) -> int:
+    """``"attack"`` / ``"both"`` / ``"all"`` (or ``"2"`` / ``"1"`` / ``"0"``) -> wall_filter value."""
+    key = str(name).strip().lower()
+    aliases = {"attack-only": "attack", "attack_only": "attack", "defense": "both", "defence": "both",
+               "attack+defense": "both", "attack+defence": "both", "full": "all", "every": "all"}
+    key = aliases.get(key, key)
+    for mode, value, _ in WALL_MODES:
+        if key in (mode, str(value)):
+            return value
+    raise ValueError(f"walls must be one of: {', '.join(m for m, _, _ in WALL_MODES)}")
+
+
+def wall_mode_label(wall_filter: int) -> str:
+    for _, value, label in WALL_MODES:
+        if value == wall_filter:
+            return label
+    return f"wall_filter={wall_filter}"
 
 
 class EngineError(RuntimeError):
@@ -144,7 +173,7 @@ class CppEngine:
     def __init__(self, path: Optional[str] = None, options: Optional[Mapping[str, OptionValue]] = None) -> None:
         path = path or find_engine()
         if path is None:
-            raise EngineError("C++ engine not built. Run: python -m quoridor.bots.cpp_engine build")
+            raise EngineError("C++ engine not built. Run: python build_engine.py")
         self.path = path
         self._lock = threading.Lock()
         self._proc: Optional[subprocess.Popen] = subprocess.Popen(
@@ -369,4 +398,4 @@ if __name__ == "__main__":
         print("built", build())
     else:
         path = find_engine()
-        print(path or "engine not built; run: python -m quoridor.bots.cpp_engine build")
+        print(path or "engine not built; run: python build_engine.py")

@@ -30,7 +30,8 @@ def build_players(settings: MatchSettings, gui: QuoridorGUI, names: tuple[str, s
 
         inner = MLPlayer(settings.ml_model, "ML agent", settings.ml_sims)
     else:
-        inner = make_search_bot(f"Bot (depth {settings.depth})", settings.depth, settings.time_limit)
+        inner = make_search_bot(f"Bot (depth {settings.depth})", settings.depth, settings.time_limit,
+                                {"wall_filter": settings.wall_filter})
     bot = GuiBotPlayer(inner, gui)
     human = GuiHumanPlayer(names[settings.human_side], gui)
     return (human, bot) if settings.human_side == 0 else (bot, human)

@@ -1,7 +1,8 @@
 """Start menu for the pygame GUI.
 
-Modes: Human vs Human, Human vs Bot (depth slider, think time, side) and
-Bot vs Bot (independent depth + think time for each bot, move delay).
+Modes: Human vs Human, Human vs Bot (depth slider, think time, side, walls the
+bot considers) and Bot vs Bot (independent depth, think time and walls for each
+bot, move delay).
 """
 
 from __future__ import annotations
@@ -11,7 +12,8 @@ from typing import Optional
 
 import pygame
 
-from ..bots import MAX_DEPTH, BotSpec
+from ..bots import MAX_DEPTH, BotSpec, engine_available
+from ..bots.cpp_engine import DEFAULT_WALL_FILTER, WALL_MODES
 from . import theme as T
 
 TIME_CHOICES: tuple[Optional[float], ...] = (1.0, 3.0, 5.0, 10.0, 30.0, None)
@@ -28,6 +30,7 @@ class MatchSettings:
     human_side: int = 0          # Human vs Bot: 0 = Red (moves first), 1 = Blue
     ml_model: Optional[str] = None  # Human vs Bot against a trained ML checkpoint instead of alpha-beta
     ml_sims: int = 64
+    wall_filter: int = DEFAULT_WALL_FILTER  # Human vs Bot: 2 = attack only, 1 = attack + defense, 0 = all walls
     # Bot vs Bot: one spec per colour (Red, Blue) and a pause between moves so you can watch.
     bots: tuple[BotSpec, BotSpec] = field(default_factory=lambda: (BotSpec(depth=2), BotSpec(depth=4)))
     move_delay: float = 0.5
@@ -35,6 +38,12 @@ class MatchSettings:
 
 def _time_label(t: Optional[float]) -> str:
     return "no limit" if t is None else f"{t:g} s"
+
+
+def _walls_hint() -> str:
+    if not engine_available():
+        return "(needs the C++ engine; the Python bot ignores this)"
+    return "attack only = deepest, all walls = widest"
 
 
 class Slider:
@@ -76,20 +85,25 @@ class Menu:
         mw = (col_w - 2 * 10) / 3
         self.mode_rects = [pygame.Rect(self.left + i * (mw + 10), 150, mw, 52) for i in range(3)]
         # Human vs Bot
-        self.slider = Slider(pygame.Rect(self.left + 10, 285, col_w - 20, 8))
+        self.slider = Slider(pygame.Rect(self.left + 10, 262, col_w - 20, 8))
         bw = (col_w - 5 * 8) / 6
-        self.time_rects = [pygame.Rect(self.left + i * (bw + 8), 360, bw, 40) for i in range(6)]
-        self.side_rects = [pygame.Rect(self.left, 450, col_w / 2 - 6, 40),
-                           pygame.Rect(self.left + col_w / 2 + 6, 450, col_w / 2 - 6, 40)]
+        self.time_rects = [pygame.Rect(self.left + i * (bw + 8), 328, bw, 36) for i in range(6)]
+        self.side_rects = [pygame.Rect(self.left, 406, col_w / 2 - 6, 36),
+                           pygame.Rect(self.left + col_w / 2 + 6, 406, col_w / 2 - 6, 36)]
+        ww = (col_w - 2 * 8) / 3
+        self.wall_rects = [pygame.Rect(self.left + i * (ww + 8), 484, ww, 36) for i in range(3)]
         # Bot vs Bot: two columns
         half = (col_w - 30) / 2
         self.bot_cols = [self.left, self.left + half + 30]
         self.bot_sliders = [Slider(pygame.Rect(x + 10, 300, half - 20, 8)) for x in self.bot_cols]
         tw = (half - 5 * 4) / 6
-        self.bot_time_rects = [[pygame.Rect(x + i * (tw + 4), 360, tw, 32) for i in range(6)]
+        self.bot_time_rects = [[pygame.Rect(x + i * (tw + 4), 356, tw, 30) for i in range(6)]
+                               for x in self.bot_cols]
+        bww = (half - 2 * 4) / 3
+        self.bot_wall_rects = [[pygame.Rect(x + i * (bww + 4), 424, bww, 30) for i in range(3)]
                                for x in self.bot_cols]
         dw = (col_w - 4 * 8) / 5
-        self.delay_rects = [pygame.Rect(self.left + i * (dw + 8), 450, dw, 36) for i in range(5)]
+        self.delay_rects = [pygame.Rect(self.left + i * (dw + 8), 494, dw, 32) for i in range(5)]
         self.start_rect = pygame.Rect(self.cx - 120, h - 120, 240, 54)
 
     # ------------------------------------------------------------------ #
@@ -142,6 +156,9 @@ class Menu:
             for i, r in enumerate(self.side_rects):
                 if r.collidepoint(pos):
                     s = replace(s, human_side=i)
+            for (_, value, _), r in zip(WALL_MODES, self.wall_rects):
+                if r.collidepoint(pos):
+                    s = replace(s, wall_filter=value)
         elif s.mode == "bvb":
             for b in (0, 1):
                 if s.bots[b].kind != "ab":
@@ -152,6 +169,11 @@ class Menu:
                 for i, r in enumerate(self.bot_time_rects[b]):
                     if r.collidepoint(pos):
                         s = self._set_bot(s, b, time_limit=TIME_CHOICES[i])
+                for (_, value, _), r in zip(WALL_MODES, self.bot_wall_rects[b]):
+                    if r.collidepoint(pos):
+                        bots = list(s.bots)
+                        bots[b] = bots[b].with_wall_filter(value)
+                        s = replace(s, bots=(bots[0], bots[1]))
             for i, r in enumerate(self.delay_rects):
                 if r.collidepoint(pos):
                     s = replace(s, move_delay=DELAY_CHOICES[i])
@@ -198,20 +220,24 @@ class Menu:
 
     def _draw_hvb(self, s: MatchSettings) -> None:
         g = self.gui
-        g._text(f"Search depth: {s.depth}", (self.left, 250), g.font, T.TEXT, anchor="midleft")
-        g._text("1-30 plies (arrow keys work too)", (self.left + self.col_w, 250), g.font_small,
+        g._text(f"Search depth: {s.depth}", (self.left, 228), g.font, T.TEXT, anchor="midleft")
+        g._text("1-30 plies (arrow keys work too)", (self.left + self.col_w, 228), g.font_small,
                 T.TEXT_DIM, anchor="midright")
         self.slider.draw(self.screen, s.depth, T.PANEL_ACTIVE_EDGE)
-        g._text("faster", (self.slider.rect.left, 312), g.font_small, T.TEXT_DIM, anchor="midleft")
-        g._text("stronger", (self.slider.rect.right, 312), g.font_small, T.TEXT_DIM, anchor="midright")
-        g._text("Think time per bot move", (self.left, 342), g.font_small, T.TEXT_DIM, anchor="midleft")
+        g._text("faster", (self.slider.rect.left, 286), g.font_small, T.TEXT_DIM, anchor="midleft")
+        g._text("stronger", (self.slider.rect.right, 286), g.font_small, T.TEXT_DIM, anchor="midright")
+        g._text("Think time per bot move", (self.left, 312), g.font_small, T.TEXT_DIM, anchor="midleft")
         for t, r in zip(TIME_CHOICES, self.time_rects):
             self._button(r, _time_label(t), s.time_limit == t)
-        g._text("You play", (self.left, 432), g.font_small, T.TEXT_DIM, anchor="midleft")
+        g._text("You play", (self.left, 390), g.font_small, T.TEXT_DIM, anchor="midleft")
         self._button(self.side_rects[0], "Red (moves first)", s.human_side == 0, T.PAWN_COLORS[0])
         self._button(self.side_rects[1], "Blue", s.human_side == 1, T.PAWN_COLORS[1])
+        g._text("Walls the bot considers", (self.left, 468), g.font_small, T.TEXT_DIM, anchor="midleft")
+        g._text(_walls_hint(), (self.left + self.col_w, 468), g.font_small, T.TEXT_DIM, anchor="midright")
+        for (_, value, label), r in zip(WALL_MODES, self.wall_rects):
+            self._button(r, label, s.wall_filter == value)
         g._text("The bot plays the best move from the deepest search it completes within the time.",
-                (self.cx, 525), g.font_small, T.TEXT_DIM)
+                (self.cx, 545), g.font_small, T.TEXT_DIM)
 
     def _draw_bvb(self, s: MatchSettings) -> None:
         g = self.gui
@@ -227,13 +253,17 @@ class Menu:
                 continue
             g._text(f"Depth {spec.depth}", (x, 276), g.font, T.TEXT, anchor="midleft")
             self.bot_sliders[b].draw(self.screen, spec.depth, color)
-            g._text("Think time", (x, 342), g.font_small, T.TEXT_DIM, anchor="midleft")
+            g._text("Think time", (x, 340), g.font_small, T.TEXT_DIM, anchor="midleft")
             for t, r in zip(TIME_CHOICES, self.bot_time_rects[b]):
                 self._button(r, "none" if t is None else f"{t:g}s", spec.time_limit == t, color)
-        g._text("Pause between moves (so you can follow the game)", (self.left, 432), g.font_small,
+            g._text("Walls considered" + ("" if engine_available() else " (C++ engine only)"), (x, 408), g.font_small, T.TEXT_DIM, anchor="midleft")
+            for (_, value, label), r in zip(WALL_MODES, self.bot_wall_rects[b]):
+                short = {"Attack + defense": "Att + def"}.get(label, label)
+                self._button(r, short, spec.wall_filter == value, color)
+        g._text("Pause between moves (so you can follow the game)", (self.left, 480), g.font_small,
                 T.TEXT_DIM, anchor="midleft")
         for d, r in zip(DELAY_CHOICES, self.delay_rects):
             self._button(r, "none" if d == 0 else f"{d:g} s", s.move_delay == d)
         g._text("While watching: Space = pause/resume, R = back to this menu.  "
                 "For many fast games use: python -m quoridor.botmatch",
-                (self.cx, 515), g.font_small, T.TEXT_DIM)
+                (self.cx, 548), g.font_small, T.TEXT_DIM)

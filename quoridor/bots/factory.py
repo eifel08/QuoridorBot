@@ -6,6 +6,8 @@ Spec syntax (used by ``main.py --bot1/--bot2`` and ``python -m quoridor.botmatch
     ab:depth=2              alpha-beta, depth 2
     ab:depth=8,time=2       alpha-beta, depth 8, at most 2 s per move
     ab:depth=4,random=1     alpha-beta with random tie-breaking (varied games)
+    ab:depth=8,walls=attack walls the bot considers: attack (attack only), both (attack + defense,
+                            the default) or all (every legal wall); C++ engine only
     ab:depth=30,time=1,futility=0,wall_filter=0
                             C++ engine flags (see engine/README.md); ``filter`` = ``wall_filter``
     ab:depth=4,engine=py    force the pure-Python search (``engine=cpp`` forces the C++ one)
@@ -23,13 +25,14 @@ from __future__ import annotations
 
 import os
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Optional
 
 from ..player import Player
 from . import cpp_engine
 from .alphabeta import MAX_DEPTH, AlphaBetaBot, FastBoard, search_board
-from .cpp_engine import DEFAULT_OPTIONS, make_search_bot
+from .cpp_engine import (DEFAULT_OPTIONS, DEFAULT_WALL_FILTER, make_search_bot, wall_filter_from_name,
+                         wall_mode_label)
 
 IMove = tuple[str, int]
 
@@ -45,6 +48,18 @@ class BotSpec:
     engine: str = "auto"               # alpha-beta: "auto" (C++ if built), "cpp" or "py"
     options: tuple[tuple[str, int], ...] = ()  # alpha-beta: C++ engine flags, e.g. (("futility", 0),)
 
+    @property
+    def wall_filter(self) -> int:
+        """Walls the search considers: 2 = attack only, 1 = attack + defense, 0 = all."""
+        return dict(self.options).get("wall_filter", DEFAULT_WALL_FILTER)
+
+    def with_wall_filter(self, value: int) -> "BotSpec":
+        opts = [(k, v) for k, v in self.options if k != "wall_filter"]
+        if value != DEFAULT_WALL_FILTER:
+            opts.append(("wall_filter", int(value)))
+        order = list(DEFAULT_OPTIONS)
+        return replace(self, options=tuple(sorted(opts, key=lambda kv: order.index(kv[0]))))
+
     def uses_cpp(self) -> bool:
         return self.kind == "ab" and cpp_engine.resolve_engine(self.engine) == "cpp"
 
@@ -52,7 +67,8 @@ class BotSpec:
         if self.kind == "ml":
             return f"ML ({self.sims} sims)"
         t = f", {self.time_limit:g}s" if self.time_limit else ""
-        return f"Alpha-beta d{self.depth}{t}"
+        w = f", {wall_mode_label(self.wall_filter).lower()}" if self.wall_filter != DEFAULT_WALL_FILTER else ""
+        return f"Alpha-beta d{self.depth}{t}{w}"
 
     def to_string(self) -> str:
         if self.kind == "ml":
@@ -84,6 +100,11 @@ def parse_bot_spec(text: str) -> BotSpec:
 
     if "filter" in opts:
         opts["wall_filter"] = opts.pop("filter")
+    if "walls" in opts and kind == "ab":
+        try:
+            opts["wall_filter"] = str(wall_filter_from_name(opts.pop("walls")))
+        except ValueError as exc:
+            raise ValueError(f"bad bot spec '{text}': {exc}") from None
     allowed = {"ab": {"depth", "time", "random", "engine", *DEFAULT_OPTIONS}, "ml": {"model", "sims"}}[kind]
     unknown = set(opts) - allowed
     if unknown:

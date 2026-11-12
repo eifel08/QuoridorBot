@@ -9,7 +9,7 @@ bot-match runner use it automatically once it is built; without it they fall bac
 Any C++20 compiler works (g++ 10+, clang 12+, MSVC 2019+). Pick one:
 
 ```bash
-python -m quoridor.bots.cpp_engine build
+python build_engine.py
 ```
 
 ```bash
@@ -34,6 +34,7 @@ somewhere else, set the `QUORIDOR_ENGINE` environment variable to its path.
 python main.py                                  # menu; bots now think with the C++ engine
 python main.py --mode bot --depth 30 --time-limit 2
 python main.py --mode bots --bot1 ab:depth=30,time=1 --bot2 ab:depth=30,time=1,futility=0
+python main.py --mode bot --walls attack        # walls considered: attack | both (default) | all
 python main.py --engine py                      # force the old Python search
 ```
 
@@ -42,7 +43,9 @@ move of the deepest iteration it completed. With the C++ engine a high depth plu
 (e.g. depth 30, 1-5 s) is the sensible setting.
 
 Bot specs (`--bot1/--bot2`, `python -m quoridor.botmatch`) accept every engine option below, e.g.
-`ab:depth=6,wall_filter=0,futility=0`, plus `engine=cpp|py|auto`.
+`ab:depth=6,wall_filter=0,futility=0`, plus `engine=cpp|py|auto` and `walls=attack|both|all`
+(the same as `wall_filter=2|1|0`). The wall mode can also be picked per bot in the GUI menu and
+the `--cli` questions.
 
 ## Architecture
 

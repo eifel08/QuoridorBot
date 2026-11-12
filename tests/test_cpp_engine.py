@@ -1,6 +1,6 @@
 """C++ engine: rules parity with the Python engine, search correctness, GUI glue.
 
-Skipped when the engine has not been built (``python -m quoridor.bots.cpp_engine build``).
+Skipped when the engine has not been built (``python build_engine.py``).
 The heavy versions of the parity / TT checks are ``python -m tools.parity`` and
 ``python -m tools.verify_search``.
 """
@@ -288,7 +288,10 @@ class TestCppBot(unittest.TestCase):
         self.assertIsInstance(bot, CppBot)
         self.assertEqual(bot.options, {"wall_filter": 0, "futility": 0})
         self.assertNotIsInstance(make_player(parse_bot_spec("ab:depth=2,engine=py")), CppBot)
-        for bad in ("ab:engine=rust", "ab:futility=x", "ab:engine=py,futility=0"):
+        for text, value in (("ab:walls=attack", 2), ("ab:walls=both", 1), ("ab:walls=all", 0), ("ab", 1)):
+            self.assertEqual(parse_bot_spec(text).wall_filter, value, text)
+        self.assertEqual(make_player(parse_bot_spec("ab:walls=all"), "x").options, {"wall_filter": 0})
+        for bad in ("ab:engine=rust", "ab:futility=x", "ab:engine=py,futility=0", "ab:walls=some"):
             with self.assertRaises(ValueError, msg=bad):
                 parse_bot_spec(bad)
 
@@ -320,8 +323,9 @@ class TestGuiEndToEnd(unittest.TestCase):
         from quoridor.gui import MatchSettings, QuoridorGUI, build_players
 
         gui = QuoridorGUI()
-        human, bot = build_players(MatchSettings("hvb", depth=6, time_limit=0.5), gui, ("A", "B"))
+        human, bot = build_players(MatchSettings("hvb", depth=6, time_limit=0.5, wall_filter=2), gui, ("A", "B"))
         self.assertIsInstance(bot.bot, CppBot)
+        self.assertEqual(bot.bot.options, {"wall_filter": 2})  # the menu's wall choice reaches the engine
         state = Board().snapshot(1)
         move = bot.get_move(state)  # runs the engine in the GUI's worker thread
         self.assertIsNone(Board().move_error(1, move))

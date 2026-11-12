@@ -126,6 +126,7 @@ Bot 2   ab:depth=4                            67   67.0%   57.3%   76.0%    58.0
 | `ab:depth=2` | alpha-beta, depth 2 |
 | `ab:depth=8,time=2` | alpha-beta, depth 8, at most 2 s per move |
 | `ab:depth=4,random=1` | alpha-beta that picks at random between equally good moves |
+| `ab:depth=8,walls=attack` | walls the bot considers: `attack` (only walls on the opponent's shortest paths), `both` (attack + defense, default) or `all` (C++ engine) |
 | `ab:depth=30,time=1,futility=0` | C++ engine with a flag changed (flags: [engine/README.md](engine/README.md)) |
 | `ab:depth=4,engine=py` | force the Python search (`engine=cpp` forces C++; default: C++ if built) |
 | `ml:model=runs/exp1/best.pt` | trained ML agent (needs PyTorch), 64 MCTS simulations per move |
@@ -143,13 +144,22 @@ The bots think with a C++ engine (`engine/`) when it has been built, and with th
 described in the next section otherwise. Build it once:
 
 ```bash
-python -m quoridor.bots.cpp_engine build
+python build_engine.py
 ```
 
 It implements the same rules, searches millions of positions per second, and adds a
 transposition table, wall filtering, decided-position cutoffs and futility pruning. With it, set a
 high depth and let the think time decide (e.g. `python main.py --mode bot --depth 30 --time-limit 2`).
-`python main.py --engine py` forces the Python search. Architecture, flags, benchmarks and the
+`python main.py --engine py` forces the Python search.
+
+**Walls the bot considers** (menu buttons in Human vs Bot and Bot vs Bot, a question in `--cli`,
+`--walls attack|both|all` on the command line, `walls=` in bot specs):
+
+| Choice | Walls searched | Effect |
+|---|---|---|
+| Attack only | walls that block an edge on any shortest path of the opponent | narrowest tree, deepest search; strongest at short think times in our tests |
+| Attack + defense (default) | the above, plus walls that pre-empt the opponent's blocking walls | |
+| All walls | every legal wall | widest tree, shallowest search; nothing is overlooked | Architecture, flags, benchmarks and the
 verification tools are documented in [engine/README.md](engine/README.md).
 
 ## The alpha-beta bot (Python reference)
@@ -382,12 +392,22 @@ versions (e.g. 3.14 on Windows), whereas plain `pygame` tries to compile from so
 fails. If you previously installed plain `pygame`, run `pip uninstall pygame` first, since the
 two can't be installed side by side.
 
+Build the C++ engine once (and again after pulling changes to `engine/`) so the bots think fast.
+It needs a C++20 compiler: g++ / clang++ on Linux and macOS (`xcode-select --install`), and on
+Windows either MinGW-w64 g++ or Visual Studio's "Desktop development with C++" (run the command
+from a "Developer Command Prompt"). Without it the bots use the slower Python search.
+
+```bash
+python build_engine.py
+```
+
 | Command | Version |
 |---|---|
 | `python3 main.py` | pygame desktop window (starts with the mode menu) |
 | `python3 main.py --p1 Alice --p2 Bob` | desktop window with names |
 | `python3 main.py --cli` | terminal (no dependencies; asks for the mode) |
 | `python3 main.py --mode bot --depth 6` | desktop window, straight into Human vs Bot |
+| `python3 main.py --mode bot --depth 30 --time-limit 3 --walls attack` | Human vs Bot, C++ engine, 3 s per move, attack walls only |
 | `python3 main.py --ml-model best.pt` | play against a trained ML agent (needs PyTorch) |
 | `python3 main.py --mode bots --bot1 ab:depth=2 --bot2 ab:depth=4` | watch Bot vs Bot |
 | `python3 -m quoridor.botmatch --games 100` | fast headless Bot vs Bot batch with statistics |

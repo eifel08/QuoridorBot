@@ -42,7 +42,7 @@ Every front-end lets you pick the mode before a game:
 
 | | Browser | Desktop window | Terminal |
 |---|---|---|---|
-| Choose the mode | *Human vs Human / Human vs Bot* switch at the top | start menu | prompt at start |
+| Choose the mode | *Human vs Human / Human vs Bot / Bot vs Bot* switch at the top | start menu | prompt at start |
 | Search depth (1-30) | slider | slider (or arrow keys) | prompt |
 | Think-time cap | dropdown (1 s ... no limit) | buttons | prompt |
 | Play Red (first) or Blue | dropdown | buttons | prompt |
@@ -52,9 +52,88 @@ Every front-end lets you pick the mode before a game:
   the number of positions it searched, the time it took and its score are shown (under the board in
   the browser, in the side panel on the desktop, after the move in the terminal).
   In the browser, *Undo* takes back your move and the bot's reply.
+- **Bot vs Bot**: two bots with independent settings play each other while you watch, or run
+  hundreds of games without a board. See the next section.
 
 Shortcuts: `python3 main.py --mode bot --depth 6 --time-limit 3 --play-as 2` skips the desktop menu
 (add `--cli` for the terminal). In the browser, `?mode=bot&depth=6` preselects the mode and depth.
+
+## Bot vs Bot
+
+Set up two bots with different settings (e.g. depth 2 against depth 4, or a trained ML agent
+against alpha-beta) and either **watch** a game move by move or run a fast **batch** of games for
+statistics.
+
+### Watching a game
+
+**Browser** (`python3 main.py --web` or the GitHub Pages link): choose *Bot vs Bot*, then set:
+- a depth slider (1-30) and a think-time limit for the Red bot and, separately, for the Blue bot;
+- *Speed*: the pause between moves (Slow / Normal / Fast / Instant);
+- *Vary games*: the bots pick at random between equally good moves, so repeated games differ.
+  The alpha-beta bot is otherwise fully deterministic;
+- *Play continuously*: starts the next game automatically and keeps a running score;
+- *Pause* / *Step* / *Undo*: stop, play one move at a time, or go back one move (Space also
+  pauses).
+
+`?mode=bots&red=2&blue=5` in the URL preselects the mode and both depths.
+
+**Desktop window**: `python3 main.py`, then *Bot vs Bot* in the menu. Each bot has its own depth
+slider and think-time buttons, and there's a choice of pause between moves. While a game runs:
+Space pauses or resumes, R goes back to the menu. To skip the menu:
+
+```bash
+python3 main.py --mode bots --bot1 ab:depth=2 --bot2 ab:depth=4 --delay 0.5
+```
+
+**Terminal**: `python3 main.py --cli`, choose `3`, or add the same flags with `--cli`. The board
+is printed after every move.
+
+### Batch mode (fast, no board)
+
+```bash
+python3 -m quoridor.botmatch --bot1 ab:depth=2 --bot2 ab:depth=4 --games 100
+```
+
+(`python3 main.py --mode bots --headless --games 100 ...` does the same.) Example output:
+
+```
+        spec                                wins   win %  CI low  as Red  as Blue  s/move  walls
+Bot 1   ab:depth=2                            33   33.0%   24.6%   42.0%    24.0%   0.004    7.4
+Bot 2   ab:depth=4                            67   67.0%   57.3%   76.0%    58.0%   0.054    9.7
+100 games, 0 draws, 65 moves per game on average, 51.0s total
+```
+
+- **Speed**: games run in parallel on all CPU cores (`--workers N` to change). The 100 games above
+  took 51 s on 4 cores.
+- **Fairness**: the bots **swap colours every game** (moving first is an advantage; `--no-swap`
+  keeps Bot 1 on Red).
+- **Varied openings**: each game starts with 0-6 random moves (`--opening-plies`, 0 = normal start).
+  Without them, two deterministic bots would play the same game every time. `--seed` fixes the
+  openings, so different settings can be compared on identical games.
+- **Columns**: `CI low` is the 95% lower confidence bound of the win rate. `s/move` is the average
+  thinking time per move, and `walls` the average number of walls placed per game.
+- **Saving results**: `--json results.json` saves the summary plus every game, and
+  `--csv games.csv` saves one row per game.
+- Games that reach 200 moves count as draws.
+
+### Bot settings
+
+`--bot1` / `--bot2` take a short spec (the same format everywhere):
+
+| Spec | Bot |
+|---|---|
+| `ab` | alpha-beta, depth 4, no time limit |
+| `ab:depth=2` | alpha-beta, depth 2 |
+| `ab:depth=8,time=2` | alpha-beta, depth 8, at most 2 s per move |
+| `ab:depth=4,random=1` | alpha-beta that picks at random between equally good moves |
+| `ml:model=runs/exp1/best.pt` | trained ML agent (needs PyTorch), 64 MCTS simulations per move |
+| `ml:model=best.pt,sims=0` | ML agent playing its network's first choice without search (fast) |
+
+Example, checking a trained model against the bot it was trained on:
+
+```bash
+python3 -m quoridor.botmatch --bot1 ml:model=runs/exp1/best.pt --bot2 ab:depth=4 --games 200
+```
 
 ## The alpha-beta bot
 
@@ -293,6 +372,8 @@ two can't be installed side by side.
 | `python3 main.py --cli` | terminal (no dependencies; asks for the mode) |
 | `python3 main.py --mode bot --depth 6` | desktop window, straight into Human vs Bot |
 | `python3 main.py --ml-model best.pt` | play against a trained ML agent (needs PyTorch) |
+| `python3 main.py --mode bots --bot1 ab:depth=2 --bot2 ab:depth=4` | watch Bot vs Bot |
+| `python3 -m quoridor.botmatch --games 100` | fast headless Bot vs Bot batch with statistics |
 | `python3 main.py --web` | browser version on localhost |
 
 Run the tests (GUI tests run headless and are skipped without pygame; the web engine test
@@ -373,6 +454,8 @@ quoridor/
   board.py             Mutable rules engine: movement/jumps, wall validation, BFS
   player.py            Player (abstract base), CLI HumanPlayer, command parser
   bots/alphabeta.py    AlphaBetaBot: negamax alpha-beta search, heuristic, iterative deepening
+  bots/factory.py      bot spec strings ("ab:depth=4", "ml:model=...") -> players / fast policies
+  botmatch.py          headless Bot vs Bot batch runner (parallel, statistics, JSON/CSV)
   ml/                  ML agent + training pipeline (PyTorch, see requirements-ml.txt)
     arena.py           fast game runner, seeded random openings, win-rate statistics
     encoding.py        board -> network planes, 209-action space, mirroring
@@ -390,7 +473,7 @@ requirements-ml.txt  torch, numpy, tensorboard (training only)
     layout.py          Pure pixel geometry (squares, grooves, wall snapping)
     app.py             QuoridorGUI: pygame drawing, mouse input, animations
     anim.py, theme.py  Tweens and colors
-    menu.py            Start menu: mode, depth slider, think time, side
+    menu.py            Start menu: mode, depth sliders, think times, side, move delay
     player.py          GuiHumanPlayer, GuiBotPlayer (runs a bot in a background thread)
 tests/                 unittest suite
 ```

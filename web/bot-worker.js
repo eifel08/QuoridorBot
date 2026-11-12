@@ -2,7 +2,7 @@
 import { search } from "./bot.js";
 
 self.onmessage = (evt) => {
-  const { id, snapshot, depth, timeLimitMs } = evt.data;
-  const result = search(snapshot, depth, timeLimitMs);
+  const { id, snapshot, depth, timeLimitMs, seed } = evt.data;
+  const result = search(snapshot, depth, timeLimitMs, seed ?? null);
   self.postMessage({ id, ...result });
 };

@@ -101,13 +101,26 @@ function resetUi() {
 }
 
 // ---------------------------------------------------------------- bot
-const settings = { mode: "hvh", depth: 4, timeMs: 5000, humanSide: 0 };
-const isBot = (p) => settings.mode === "hvb" && p !== settings.humanSide;
+const settings = {
+  mode: "hvh", depth: 4, timeMs: 5000, humanSide: 0,           // Human vs Bot
+  bots: [{ depth: 2, timeMs: 0 }, { depth: 4, timeMs: 0 }],    // Bot vs Bot: Red, Blue
+  delayMs: 500, vary: true, autoplay: false,
+};
+const isBot = (p) => settings.mode === "bvb" || (settings.mode === "hvb" && p !== settings.humanSide);
+const botConfig = (p) => (settings.mode === "bvb" ? settings.bots[p] : { depth: settings.depth, timeMs: settings.timeMs });
+const MAX_PLIES = 300;  // Bot vs Bot: call a draw after this many moves
+let paused = false;
+let stepOnce = false;
+let botTimer = null;
+let gameSeed = 1;
+const score = { games: 0, wins: [0, 0], draws: 0 };
+let scoredThisGame = false;
+let drawn = false;
 let worker = null;
 let workerBroken = false;
 let requestId = 0;
 let thinking = false;
-let lastBotInfo = null;
+let lastBotInfo = [null, null];  // per colour
 
 function getWorker() {
   if (worker || workerBroken) return worker;
@@ -127,39 +140,97 @@ function getWorker() {
 }
 
 function maybeBotTurn() {
-  if (snap.winner !== null || !isBot(snap.current_player) || thinking || animating) return;
+  if (snap.winner !== null || drawn || !isBot(snap.current_player) || thinking || animating) return;
+  if (settings.mode === "bvb") {
+    if (snap.move_number >= MAX_PLIES) { declareDraw(); return; }
+    if (paused && !stepOnce) { renderPanel(); return; }
+  }
+  const step = stepOnce;
+  stepOnce = false;
   thinking = true;
   const id = ++requestId;
-  const msg = { id, snapshot: snap, depth: settings.depth, timeLimitMs: settings.timeMs || null };
-  const w = getWorker();
-  if (w) {
-    w.postMessage(msg);
-  } else {
-    // Let the "thinking" status paint before blocking the main thread.
-    setTimeout(() => onBotResult({ id, ...botSearch(msg.snapshot, msg.depth, msg.timeLimitMs) }), 50);
-  }
+  const p = snap.current_player;
+  const cfg = botConfig(p);
+  const seed = settings.mode === "bvb" && settings.vary ? gameSeed * 1000 + snap.move_number : null;
+  const msg = { id, snapshot: snap, depth: cfg.depth, timeLimitMs: cfg.timeMs || null, seed };
+  const send = () => {
+    botTimer = null;
+    if (id !== requestId) return;
+    const w = getWorker();
+    if (w) {
+      w.postMessage(msg);
+    } else {
+      // Let the "thinking" status paint before blocking the main thread.
+      setTimeout(() => onBotResult({ id, ...botSearch(msg.snapshot, msg.depth, msg.timeLimitMs, msg.seed) }), 50);
+    }
+  };
+  // Bot vs Bot: leave time between moves so the game can be followed.
+  const delay = settings.mode === "bvb" && !step && snap.move_number > 0 ? settings.delayMs : 0;
+  if (delay) botTimer = setTimeout(send, delay); else send();
   renderPanel();
 }
 
 function onBotResult({ id, move, info }) {
   if (id !== requestId || !thinking) return;  // stale answer (new game / undo)
   thinking = false;
-  lastBotInfo = info;
+  lastBotInfo[snap.current_player] = info;
   play(move);
 }
 
 function cancelBot() {
   requestId++;
+  if (botTimer) { clearTimeout(botTimer); botTimer = null; }
   if (thinking && worker) { worker.terminate(); worker = null; }
   thinking = false;
 }
 
-function describeBotInfo(info) {
+function declareDraw() {
+  drawn = true;
+  recordResult(null);
+  render();
+}
+
+function recordResult(winner) {
+  if (settings.mode !== "bvb" || scoredThisGame) return;
+  scoredThisGame = true;
+  score.games += 1;
+  if (winner === null) score.draws += 1; else score.wins[winner] += 1;
+  renderScore();
+  if (settings.autoplay) setTimeout(() => { if (settings.autoplay && settings.mode === "bvb") newGame(); }, 1500);
+}
+
+function resetScore() {
+  score.games = 0; score.wins = [0, 0]; score.draws = 0;
+  renderScore();
+}
+
+function renderScore() {
+  const el = $("score");
+  if (!score.games) { el.textContent = ""; return; }
+  const n = names();
+  el.textContent = `Score: ${n[0]} ${score.wins[0]} – ${score.wins[1]} ${n[1]}` +
+    (score.draws ? ` · ${score.draws} draw${score.draws > 1 ? "s" : ""}` : "") +
+    ` · ${score.games} game${score.games > 1 ? "s" : ""}`;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.textContent = "Reset";
+  btn.addEventListener("click", resetScore);
+  el.appendChild(btn);
+}
+
+function describeBotInfo(info, who = "Bot", vs = "your") {
   if (!info) return "";
   const outcome = info.forced ? ` · sees a forced ${info.forced === "win" ? "win" : "loss"} for itself`
-    : ` · score ${info.score > 0 ? "+" : ""}${info.score} (bot steps − your steps)`;
-  return `Bot searched depth ${info.depth_reached}/${info.depth_requested} · ` +
+    : ` · score ${info.score > 0 ? "+" : ""}${info.score} (own steps − ${vs} steps)`;
+  return `${who} searched depth ${info.depth_reached}/${info.depth_requested} · ` +
     `${info.nodes.toLocaleString()} positions in ${info.seconds.toFixed(2)} s${outcome}`;
+}
+
+function botInfoText() {
+  if (settings.mode === "hvb") return describeBotInfo(lastBotInfo[1 - settings.humanSide]);
+  if (settings.mode !== "bvb") return "";
+  return [0, 1].map((p) => describeBotInfo(lastBotInfo[p], p ? "Blue" : "Red", "opponent's"))
+    .filter(Boolean).join("\n");
 }
 
 function setGame(g) {
@@ -169,7 +240,10 @@ function setGame(g) {
 }
 setGame(game);
 
-const names = () => [0, 1].map((p) => (isBot(p) ? "Bot" : $(`name${p}`).value.trim() || `Player ${p + 1}`));
+const names = () => [0, 1].map((p) => {
+  if (settings.mode === "bvb") return `${p ? "Blue" : "Red"} bot (d${settings.bots[p].depth})`;
+  return isBot(p) ? "Bot" : $(`name${p}`).value.trim() || `Player ${p + 1}`;
+});
 const $ = (id) => document.getElementById(id);
 
 // ---------------------------------------------------------------- svg helpers
@@ -320,9 +394,18 @@ function renderPanel() {
   }
   const status = $("status");
   status.classList.toggle("thinking", thinking);
-  $("bot-info").textContent = settings.mode === "hvb" ? describeBotInfo(lastBotInfo) : "";
-  if (thinking) {
-    status.textContent = "Bot is thinking";
+  $("bot-info").textContent = botInfoText();
+  const bvb = settings.mode === "bvb";
+  $("pause").textContent = paused ? "Resume" : "Pause";
+  $("step").disabled = !(bvb && paused) || thinking || snap.winner !== null || drawn;
+  if (drawn) {
+    status.textContent = `Draw: no winner after ${MAX_PLIES} moves`;
+    status.style.color = "";
+  } else if (bvb && paused && !thinking && snap.winner === null) {
+    status.textContent = `Paused · ${n[snap.current_player]} to move`;
+    status.style.color = COLORS.pawn[snap.current_player];
+  } else if (thinking) {
+    status.textContent = bvb ? `${n[snap.current_player]} is thinking` : "Bot is thinking";
     status.style.color = COLORS.pawn[snap.current_player];
   } else if (snap.winner !== null) {
     status.textContent = `${n[snap.winner]} wins!`;
@@ -337,6 +420,7 @@ function renderPanel() {
   if (snap.winner !== null) {
     $("winner-text").textContent = `${n[snap.winner]} wins!`;
     $("winner-text").style.color = COLORS.pawn[snap.winner];
+    recordResult(snap.winner);
   }
 }
 
@@ -552,8 +636,13 @@ function undo() {
   if (!history.length) return;
   cancelBot();
   let g = history.pop();
-  // Against the bot, go back to the human's previous turn.
-  while (isBot(g.current) && history.length) g = history.pop();
+  if (settings.mode === "bvb") {
+    paused = true;  // step back one move and stop, so the position can be studied
+    drawn = false;
+  } else {
+    // Against the bot, go back to the human's previous turn.
+    while (isBot(g.current) && history.length) g = history.pop();
+  }
   setGame(g);
   resetUi();
   render();
@@ -564,7 +653,10 @@ function newGame() {
   if (animating) { setTimeout(newGame, 60); return; }  // let a running animation finish
   cancelBot();
   history = [];
-  lastBotInfo = null;
+  lastBotInfo = [null, null];
+  scoredThisGame = false;
+  drawn = false;
+  gameSeed = Math.floor(Math.random() * 1e6);
   setGame(E.newGame());
   resetUi();
   render();
@@ -574,6 +666,7 @@ function newGame() {
 document.addEventListener("keydown", (evt) => {
   if (evt.target.tagName === "INPUT") return;
   if (evt.key === "Escape") cancelDrags();
+  if (evt.key === " " && settings.mode === "bvb" && evt.target.tagName !== "BUTTON") { evt.preventDefault(); togglePause(); }
   if ((evt.ctrlKey || evt.metaKey) && evt.key.toLowerCase() === "z") { evt.preventDefault(); undo(); }
 });
 $("undo").addEventListener("click", undo);
@@ -591,7 +684,7 @@ function applyNameInputs() {
   for (const p of [0, 1]) {
     const input = $(`name${p}`);
     input.disabled = isBot(p);
-    input.value = isBot(p) ? "Bot" : humanNames[p];
+    input.value = isBot(p) ? names()[p] : humanNames[p];
   }
 }
 for (const p of [0, 1]) {
@@ -608,6 +701,12 @@ function loadSettings() {
   try { Object.assign(settings, JSON.parse(localStorage.getItem("quoridor.settings") || "{}")); } catch { /* ignore */ }
   if (params.get("mode") === "bot") settings.mode = "hvb";
   if (params.get("mode") === "human") settings.mode = "hvh";
+  if (params.get("mode") === "bots") settings.mode = "bvb";
+  for (const p of [0, 1]) {
+    const d = params.get(p ? "blue" : "red");
+    if (d) settings.bots[p].depth = Number(d);
+    settings.bots[p].depth = Math.max(1, Math.min(30, Math.round(settings.bots[p].depth) || 2 + 2 * p));
+  }
   if (params.get("depth")) settings.depth = Number(params.get("depth"));
   settings.depth = Math.max(1, Math.min(30, Math.round(settings.depth) || 4));
 }
@@ -619,6 +718,15 @@ function renderSettings() {
     b.setAttribute("aria-checked", String(b.dataset.mode === settings.mode));
   }
   $("bot-options").hidden = settings.mode !== "hvb";
+  $("bvb-options").hidden = settings.mode !== "bvb";
+  for (const p of [0, 1]) {
+    $(`depth${p}`).value = settings.bots[p].depth;
+    $(`depth${p}-value`).textContent = settings.bots[p].depth;
+    $(`time${p}`).value = String(settings.bots[p].timeMs);
+  }
+  $("speed").value = String(settings.delayMs);
+  $("vary").checked = settings.vary;
+  $("autoplay").checked = settings.autoplay;
   $("depth").value = settings.depth;
   $("depth-value").textContent = settings.depth;
   $("time-limit").value = String(settings.timeMs);
@@ -629,8 +737,10 @@ for (const b of document.querySelectorAll(".segmented [data-mode]")) {
   b.addEventListener("click", () => {
     if (settings.mode === b.dataset.mode) return;
     settings.mode = b.dataset.mode;
+    paused = false;
     saveSettings();
     renderSettings();
+    resetScore();
     newGame();
   });
 }
@@ -649,6 +759,41 @@ $("human-side").addEventListener("change", () => {
   renderSettings();
   newGame();
 });
+for (const p of [0, 1]) {
+  $(`depth${p}`).addEventListener("input", () => {
+    settings.bots[p].depth = Number($(`depth${p}`).value);
+    $(`depth${p}-value`).textContent = settings.bots[p].depth;
+    saveSettings();
+    resetScore();  // different settings: old results no longer apply
+    applyNameInputs();
+    renderPanel();
+  });
+  $(`time${p}`).addEventListener("change", () => {
+    settings.bots[p].timeMs = Number($(`time${p}`).value);
+    saveSettings();
+    resetScore();
+  });
+}
+$("speed").addEventListener("change", () => { settings.delayMs = Number($("speed").value); saveSettings(); });
+$("vary").addEventListener("change", () => { settings.vary = $("vary").checked; saveSettings(); });
+$("autoplay").addEventListener("change", () => {
+  settings.autoplay = $("autoplay").checked;
+  saveSettings();
+  if (settings.autoplay && (snap.winner !== null || drawn)) newGame();
+});
+$("pause").addEventListener("click", togglePause);
+$("step").addEventListener("click", () => {
+  if (!paused || thinking) return;
+  stepOnce = true;
+  maybeBotTurn();
+});
+function togglePause() {
+  if (settings.mode !== "bvb") return;
+  paused = !paused;
+  if (paused && botTimer) cancelBot();  // not started yet: wait instead
+  renderPanel();
+  if (!paused) maybeBotTurn();
+}
 loadSettings();
 renderSettings();
 

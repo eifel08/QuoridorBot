@@ -56,6 +56,9 @@ class QuoridorGUI(GameObserver):
         self.restart_requested = False
         self.bot_thinking = False
         self.bot_info: Optional[dict] = None
+        self.bots_only = False   # Bot vs Bot: show playback hints instead of human controls
+        self.move_delay = 0.0    # Bot vs Bot: minimum seconds per move so the game can be followed
+        self.paused = False
         self.quit_requested = False
         self.mouse: tuple[int, int] = (0, 0)
         self._origin: Optional[tuple[float, ...]] = None  # pixel start of the next move animation
@@ -118,12 +121,20 @@ class QuoridorGUI(GameObserver):
     # Human input
     # ================================================================== #
     def wait_for_bot(self, state: BoardState, thread) -> None:
-        """Keep the window alive (and closable) until the bot thread finishes."""
+        """Keep the window alive (and closable) until the bot thread finishes.
+
+        In Bot vs Bot mode this also waits out ``move_delay`` (so the game can
+        be followed) and holds while the game is paused.
+        """
         self.state = state
         self.human_turn = False
         self.bot_thinking = True
+        start = pygame.time.get_ticks()
         try:
             while thread.is_alive():
+                self._frame()
+            self.bot_thinking = False
+            while self.paused or pygame.time.get_ticks() - start < self.move_delay * 1000:
                 self._frame()
         finally:
             self.bot_thinking = False
@@ -159,6 +170,8 @@ class QuoridorGUI(GameObserver):
         if event.type == pygame.KEYDOWN and event.key == pygame.K_r:
             self.restart_requested = True
             raise RestartGame()
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE and self.bots_only:
+            self.paused = not self.paused
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and \
                 Layout.contains(self.layout.button_rect, *event.pos):
             self.restart_requested = True
@@ -439,17 +452,23 @@ class QuoridorGUI(GameObserver):
         cx = L.panel_x + L.panel_width / 2
         if st.winner is None:
             cur = st.current_player
-            if self.bot_thinking:
+            if self.paused:
+                self._text("Paused", (cx, mid - 82), self.font, T.TEXT)
+            elif self.bot_thinking:
                 dots = "." * (1 + pygame.time.get_ticks() // 400 % 3)
                 self._text(f"{self.names[cur]} is thinking{dots}", (cx, mid - 82), self.font, T.PAWN_COLORS[cur])
             else:
                 self._text(f"{self.names[cur]}'s turn", (cx, mid - 82), self.font, T.PAWN_COLORS[cur])
-            hints = ("Click or drag your pawn to move",
-                     "Drag a wall from your reserve",
-                     "Right-click / Esc cancels a drag")
+            if self.bots_only:
+                delay = f"{self.move_delay:g} s between moves" if self.move_delay else "no pause between moves"
+                hints = ("Bot vs Bot", delay, "Space = pause/resume")
+            else:
+                hints = ("Click or drag your pawn to move",
+                         "Drag a wall from your reserve",
+                         "Right-click / Esc cancels a drag")
             for i, line in enumerate(hints):
                 self._text(line, (cx, mid - 52 + 20 * i), self.font_small, T.TEXT_DIM)
-        if self.bot_info:
+        if self.bot_info and "nodes" in self.bot_info:  # alpha-beta search stats
             info = self.bot_info
             outcome = (f"forced {info['forced']}" if info.get("forced")
                        else f"score {info['score']:+d}")

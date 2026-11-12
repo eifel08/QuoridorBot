@@ -6,7 +6,7 @@ from typing import Optional
 
 import pygame
 
-from ..bots import AlphaBetaBot
+from ..bots import AlphaBetaBot, make_player
 from ..game import Game
 from .app import QuoridorGUI, RestartGame
 from .layout import Layout
@@ -17,8 +17,14 @@ __all__ = ["GuiBotPlayer", "GuiHumanPlayer", "Layout", "MatchSettings", "Quorido
 
 
 def build_players(settings: MatchSettings, gui: QuoridorGUI, names: tuple[str, str]):
+    gui.bots_only = settings.mode == "bvb"
+    gui.move_delay = settings.move_delay if gui.bots_only else 0.0
+    gui.paused = False
     if settings.mode == "hvh":
         return GuiHumanPlayer(names[0], gui), GuiHumanPlayer(names[1], gui)
+    if settings.mode == "bvb":
+        return tuple(GuiBotPlayer(make_player(spec, f"Bot {i + 1}: {spec.label()}"), gui)
+                     for i, spec in enumerate(settings.bots))
     if settings.ml_model:
         from ..ml.agent import MLPlayer
 

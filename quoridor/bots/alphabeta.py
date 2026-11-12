@@ -510,8 +510,9 @@ class AlphaBetaBot(Player):
         super().__init__(name)
         self.depth = max(1, min(int(depth), MAX_DEPTH))
         self.time_limit = time_limit
+        self.rng: Optional[random.Random] = None  # set for random tie-breaking (varied games)
         self.last_info: dict = {}
 
     def get_move(self, board_state: BoardState) -> Move:
-        move, self.last_info = search(board_state, self.depth, self.time_limit)
+        move, self.last_info = search(board_state, self.depth, self.time_limit, self.rng)
         return move

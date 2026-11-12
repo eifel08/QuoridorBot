@@ -105,7 +105,7 @@ class TestSearch(unittest.TestCase):
         bot = AlphaBetaBot("A", depth=2)
         st = STATES[3]
         self.assertEqual(bot.get_move(st), bot.get_move(st))
-        self.assertEqual(set(vars(bot)), {"name", "index", "depth", "time_limit", "last_info"})
+        self.assertEqual(set(vars(bot)), {"name", "index", "depth", "time_limit", "rng", "last_info"})
 
 
 @unittest.skipIf(NODE is None, "node not installed")

@@ -24,8 +24,9 @@ class TextView(GameObserver):
 
     def on_turn_start(self, game: Game, state: BoardState) -> None:
         self._show(game, state)
-        name = game.players[state.current_player].name
-        self._out(f"\n{name}'s turn [{PAWN_SYMBOLS[state.current_player]}] (type 'help' for commands)")
+        player = game.players[state.current_player]
+        hint = " (type 'help' for commands)" if isinstance(player, HumanPlayer) else ""
+        self._out(f"\n{player.name}'s turn [{PAWN_SYMBOLS[state.current_player]}]{hint}")
 
     def on_move(self, game: Game, player: int, move: Move, before: BoardState, after: BoardState) -> None:
         self._out(f"{game.players[player].name} played {move}.")
@@ -43,19 +44,46 @@ def _ask(prompt: str, default: str) -> str:
     return answer or default
 
 
-def ask_match_settings() -> dict:
-    """Interactive mode/depth questions. Returns keyword args for run_cli."""
-    mode = _ask("Game mode: 1 = Human vs Human, 2 = Human vs Bot", "1")
-    if mode != "2":
-        return {"mode": "hvh"}
+def _ask_depth(prompt: str, default: str) -> int:
     while True:
         try:
-            depth = int(_ask("Bot search depth (1-30)", "4"))
+            depth = int(_ask(prompt, default))
             if 1 <= depth <= 30:
-                break
+                return depth
         except ValueError:
             pass
         print("  ! Please enter a whole number from 1 to 30.")
+
+
+class DelayView(GameObserver):
+    """Pauses after each move so a Bot vs Bot game can be followed."""
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds = seconds
+
+    def on_move(self, game: Game, player: int, move: Move, before: BoardState, after: BoardState) -> None:
+        if self.seconds > 0:
+            import time
+
+            time.sleep(self.seconds)
+
+
+def ask_match_settings() -> dict:
+    """Interactive mode/depth questions. Returns keyword args for run_cli."""
+    mode = _ask("Game mode: 1 = Human vs Human, 2 = Human vs Bot, 3 = Bot vs Bot", "1")
+    if mode == "3":
+        from .bots import BotSpec
+
+        d1 = _ask_depth("Bot 1 (Player 1, moves first) search depth (1-30)", "2")
+        d2 = _ask_depth("Bot 2 (Player 2) search depth (1-30)", "4")
+        try:
+            delay = float(_ask("Pause between moves in seconds", "0.5"))
+        except ValueError:
+            delay = 0.5
+        return {"mode": "bvb", "bot_specs": (BotSpec(depth=d1), BotSpec(depth=d2)), "move_delay": delay}
+    if mode != "2":
+        return {"mode": "hvh"}
+    depth = _ask_depth("Bot search depth (1-30)", "4")
     t = _ask("Think time limit per bot move in seconds (0 = no limit)", "5")
     try:
         time_limit = float(t) or None
@@ -77,8 +105,9 @@ class BotInfoView(GameObserver):
 
 
 def run_cli(mode: Optional[str] = None, depth: int = 4, time_limit: Optional[float] = 5.0,
-            human_side: int = 0, ml_model: Optional[str] = None, ml_sims: int = 64) -> None:
-    from .bots import AlphaBetaBot
+            human_side: int = 0, ml_model: Optional[str] = None, ml_sims: int = 64,
+            bot_specs=None, move_delay: float = 0.5) -> None:
+    from .bots import AlphaBetaBot, BotSpec, make_player
 
     print("=== Quoridor ===")
     print("Player 1 [1] starts at the bottom (row 8) and must reach row 0.")
@@ -90,9 +119,15 @@ def run_cli(mode: Optional[str] = None, depth: int = 4, time_limit: Optional[flo
             depth = opts.get("depth", depth)
             time_limit = opts.get("time_limit", time_limit)
             human_side = opts.get("human_side", human_side)
+            bot_specs = opts.get("bot_specs", bot_specs)
+            move_delay = opts.get("move_delay", move_delay)
         print()
-        print(HELP_TEXT)
-        if mode == "hvb":
+        if mode == "bvb":
+            specs = bot_specs or (BotSpec(depth=2), BotSpec(depth=4))
+            players = tuple(make_player(sp, f"Bot {i + 1} ({sp.label()})") for i, sp in enumerate(specs))
+            print(f"Bot vs Bot: {players[0].name} vs {players[1].name}. Ctrl+C stops.")
+        elif mode == "hvb":
+            print(HELP_TEXT)
             name = input("\nYour name (blank = 'You'): ").strip() or "You"
             human = HumanPlayer(name)
             if ml_model:
@@ -103,13 +138,17 @@ def run_cli(mode: Optional[str] = None, depth: int = 4, time_limit: Optional[flo
                 bot = AlphaBetaBot(f"Bot (depth {depth})", depth, time_limit)
             players = (human, bot) if human_side == 0 else (bot, human)
         else:
+            print(HELP_TEXT)
             name1 = input("\nName for Player 1 (blank = 'Player 1'): ").strip() or "Player 1"
             name2 = input("Name for Player 2 (blank = 'Player 2'): ").strip() or "Player 2"
             players = (HumanPlayer(name1), HumanPlayer(name2))
     except (EOFError, KeyboardInterrupt):
         print()
         return
-    game = Game(*players, observers=[TextView(), BotInfoView()])
+    observers = [TextView(), BotInfoView()]
+    if mode == "bvb":
+        observers.append(DelayView(move_delay))
+    game = Game(*players, observers=observers)
     try:
         game.run()
     except KeyboardInterrupt:

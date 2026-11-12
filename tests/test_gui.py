@@ -153,5 +153,21 @@ class TestModeSetup(unittest.TestCase):
         from quoridor.gui import QuoridorGUI
         from quoridor.gui.menu import Menu
         menu = Menu(QuoridorGUI())
-        self.assertEqual(menu._depth_at(menu.slider.left - 50), 1)
-        self.assertEqual(menu._depth_at(menu.slider.right + 50), 30)
+        self.assertEqual(menu.slider.value_at(menu.slider.rect.left - 50), 1)
+        self.assertEqual(menu.slider.value_at(menu.slider.rect.right + 50), 30)
+
+    def test_bot_vs_bot_players(self):
+        from quoridor.bots import AlphaBetaBot, BotSpec
+        from quoridor.gui import MatchSettings, QuoridorGUI, build_players
+        from quoridor.gui.player import GuiBotPlayer
+        gui = QuoridorGUI()
+        s = MatchSettings("bvb", bots=(BotSpec(depth=2), BotSpec(depth=6, time_limit=1.0)), move_delay=0.25)
+        a, b = build_players(s, gui, ("A", "B"))
+        self.assertIsInstance(a, GuiBotPlayer)
+        self.assertIsInstance(b, GuiBotPlayer)
+        self.assertIsInstance(a.bot, AlphaBetaBot)
+        self.assertEqual((a.bot.depth, b.bot.depth, b.bot.time_limit), (2, 6, 1.0))
+        self.assertTrue(gui.bots_only)
+        self.assertEqual(gui.move_delay, 0.25)
+        build_players(MatchSettings("hvh"), gui, ("A", "B"))
+        self.assertFalse(gui.bots_only)

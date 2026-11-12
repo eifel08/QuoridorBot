@@ -179,14 +179,15 @@ function evaluate(b) {
 const sameMove = (a, b) => a && b && a[0] === b[0] && a[1] === b[1];
 
 class Search {
-  constructor(board, deadline) {
+  constructor(board, deadline, rng = null) {
     this.b = board;
     this.deadline = deadline;
+    this.rng = rng;  // optional () => [0, 1): random tie-breaking at the root
     this.nodes = 0;
     this.tt = new Map();
   }
 
-  orderedMoves(ttMove) {
+  orderedMoves(ttMove, shuffle = false) {
     const b = this.b, me = b.turn, opp = 1 - me;
     const myD = b.distance(me), oppD = b.distance(opp);
     const scored = [];
@@ -222,6 +223,12 @@ class Search {
         if (nOpp === null || nMe === null) continue;
         const gain = nOpp - nMe;
         if (gain > base) scored.push([gain, m]);
+      }
+    }
+    if (shuffle && this.rng) {  // Fisher-Yates, then the stable sort keeps random order among ties
+      for (let i = scored.length - 1; i > 0; i--) {
+        const j = Math.floor(this.rng() * (i + 1));
+        [scored[i], scored[j]] = [scored[j], scored[i]];
       }
     }
     scored.sort((x, y) => y[0] - x[0]);
@@ -274,7 +281,7 @@ class Search {
     let alpha = -WIN * 2;
     const beta = WIN * 2;
     let bestVal = -WIN * 2, bestMove = null;
-    for (const m of this.orderedMoves(pvMove)) {
+    for (const m of this.orderedMoves(pvMove, true)) {
       const prev = b.pawns[me];
       b.make(m);
       const val = (m[0] === "p" && b.won(me)) ? WIN - 1 : -this.negamax(depth - 1, -beta, -alpha, 1);
@@ -291,12 +298,19 @@ class Search {
  * @param snapshot  engine snapshot (same shape as Python BoardState.to_dict())
  * @param depth     max depth in plies, 1..30
  * @param timeLimitMs  optional time budget in ms (null = none)
+ * @param seed      optional integer: break ties between equally good moves at
+ *                  random (seeded), so repeated bot-vs-bot games differ
  * @returns {move, info} with move = {type, row, col, orientation?}
  */
-export function search(snapshot, depth, timeLimitMs = null) {
+export function search(snapshot, depth, timeLimitMs = null, seed = null) {
   depth = Math.max(1, Math.min(Math.floor(depth), MAX_DEPTH));
   const t0 = performance.now();
-  const s = new Search(new FastBoard(snapshot), timeLimitMs ? t0 + timeLimitMs : null);
+  let rng = null;
+  if (seed !== null && seed !== undefined) {
+    const next = mulberry32(seed);
+    rng = () => next() / 4294967296;
+  }
+  const s = new Search(new FastBoard(snapshot), timeLimitMs ? t0 + timeLimitMs : null, rng);
   let bestMove = null, bestVal = 0, reached = 0;
   for (let d = 1; d <= depth; d++) {
     try {

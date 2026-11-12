@@ -22,6 +22,7 @@
       <div class="segmented" role="radiogroup" aria-label="Game mode">
         <button type="button" role="radio" data-mode="hvh" aria-checked="true">Human vs Human</button>
         <button type="button" role="radio" data-mode="hvb" aria-checked="false">Human vs Bot</button>
+        <button type="button" role="radio" data-mode="bvb" aria-checked="false">Bot vs Bot</button>
       </div>
       <div class="bot-options" id="bot-options" hidden>
         <label class="depth">
@@ -46,6 +47,60 @@
             <option value="1">Blue</option>
           </select>
         </label>
+      </div>
+      <div class="bvb-options" id="bvb-options" hidden>
+        <div class="bot-col" data-player="0">
+          <h3><span class="swatch red"></span>Red bot <small>(moves first)</small></h3>
+          <label class="depth">
+            <span>Depth <output id="depth0-value">2</output></span>
+            <input type="range" id="depth0" min="1" max="30" step="1" value="2">
+          </label>
+          <label class="field">
+            <span>Think time</span>
+            <select id="time0">
+              <option value="0" selected>No limit</option>
+              <option value="1000">1 s</option>
+              <option value="3000">3 s</option>
+              <option value="10000">10 s</option>
+            </select>
+          </label>
+        </div>
+        <div class="bot-col" data-player="1">
+          <h3><span class="swatch blue"></span>Blue bot</h3>
+          <label class="depth">
+            <span>Depth <output id="depth1-value">4</output></span>
+            <input type="range" id="depth1" min="1" max="30" step="1" value="4">
+          </label>
+          <label class="field">
+            <span>Think time</span>
+            <select id="time1">
+              <option value="0" selected>No limit</option>
+              <option value="1000">1 s</option>
+              <option value="3000">3 s</option>
+              <option value="10000">10 s</option>
+            </select>
+          </label>
+        </div>
+        <div class="playback">
+          <label class="field">
+            <span>Speed</span>
+            <select id="speed">
+              <option value="1200">Slow</option>
+              <option value="500" selected>Normal</option>
+              <option value="150">Fast</option>
+              <option value="0">Instant</option>
+            </select>
+          </label>
+          <label class="check" title="Bots break ties between equally good moves at random, so repeated games differ">
+            <input type="checkbox" id="vary" checked> Vary games
+          </label>
+          <label class="check" title="Start the next game automatically and keep score">
+            <input type="checkbox" id="autoplay"> Play continuously
+          </label>
+          <button type="button" id="pause">Pause</button>
+          <button type="button" id="step" disabled title="Play one move while paused">Step</button>
+        </div>
+        <p class="score" id="score"></p>
       </div>
     </section>
 
@@ -89,6 +144,7 @@
         <li><b>Wall:</b> drag a wall from your reserve onto a groove. Over a horizontal groove it covers the square under your finger and the one to its left; over a vertical groove, that square and the one below. Green means legal, red means not.</li>
         <li>Walls can't overlap or cross, and can't completely cut either player off from their goal.</li>
         <li>Esc or right-click cancels a drag. Ctrl+Z undoes (against the bot it goes back to your previous turn).</li>
+        <li><b>Bot vs Bot:</b> pick a depth and think time for each bot and watch them play. <i>Pause</i> and <i>Step</i> let you follow it move by move, and Undo steps back. <i>Vary games</i> makes the bots choose at random between equally good moves, so repeated games differ. <i>Play continuously</i> starts the next game automatically and keeps score. For hundreds of fast games, use <code>python -m quoridor.botmatch</code>.</li>
         <li><b>Human vs Bot:</b> the bot uses alpha-beta search. Its score is (bot's steps to goal) − (your steps to goal), and it tries to make that as low as possible. The depth slider sets how many moves ahead it looks (1–30). Deeper is stronger but slower. The think-time cap stops the search early and plays the best move from the deepest level it finished, shown under the board.</li>
       </ul>
     </details>

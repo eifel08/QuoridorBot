@@ -186,7 +186,7 @@ button:disabled { opacity: .45; cursor: default; }
 
 .segmented {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr;
   background: var(--panel);
   border: 1px solid var(--panel-edge);
   border-radius: 12px;
@@ -240,9 +240,51 @@ button:disabled { opacity: .45; cursor: default; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-.bot-info { margin: 2px 0 0; min-height: 1.3em; text-align: center; color: var(--dim); font-size: .85rem; }
+.bot-info { margin: 2px 0 0; min-height: 1.3em; text-align: center; color: var(--dim); font-size: .85rem; white-space: pre-line; }
 
 @media (max-width: 520px) {
   .bot-options { grid-template-columns: 1fr 1fr; }
   .bot-options .depth { grid-column: 1 / -1; }
+}
+
+.bvb-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 18px;
+  background: var(--panel);
+  border-radius: 12px;
+  padding: 10px 14px;
+}
+.bvb-options[hidden] { display: none; }
+.bvb-options h3 { margin: 0 0 6px; font-size: .95rem; display: flex; align-items: center; gap: 8px; }
+.bvb-options h3 small { color: var(--dim); font-weight: 400; }
+.bvb-options .swatch { width: 14px; height: 14px; }
+.swatch.red { background: var(--p0); }
+.swatch.blue { background: var(--p1); }
+.bot-col { display: flex; flex-direction: column; gap: 8px; }
+.bvb-options label { display: flex; flex-direction: column; gap: 4px; color: var(--dim); font-size: .85rem; }
+.bvb-options output { color: var(--text); font-weight: 700; font-size: 1rem; margin-left: 4px; }
+.bvb-options input[type="range"] { width: 100%; }
+.bot-col[data-player="0"] input[type="range"] { accent-color: var(--p0); }
+.bot-col[data-player="1"] input[type="range"] { accent-color: var(--p1); }
+.bvb-options select {
+  font: inherit; color: var(--text); background: #2c3145;
+  border: 1px solid var(--panel-edge); border-radius: 8px; padding: 5px 8px;
+}
+.playback {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 10px 14px;
+}
+.playback .check { flex-direction: row; align-items: center; gap: 6px; padding-bottom: 6px; }
+.playback button { padding: 6px 14px; }
+.score { grid-column: 1 / -1; margin: 0; color: var(--text); font-weight: 600; min-height: 1.3em; }
+.score button { margin-left: 8px; padding: 2px 10px; font-size: .8rem; font-weight: 400; }
+code { background: #2c3145; padding: 1px 5px; border-radius: 5px; font-size: .85em; }
+
+@media (max-width: 520px) {
+  .segmented button { font-size: .82rem; padding: 7px 4px; }
+  .bvb-options { grid-template-columns: 1fr; }
 }

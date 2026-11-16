@@ -151,12 +151,19 @@ class Analyzer:
         if position.turn is None or position.winner is not None:
             return
         me = position.turn
-        state = position.to_state()
+        state = position.to_state()  # the bots' board; moves go back to the screen with position.screen_move
+
+        def line(engine_move: Move) -> Line:
+            shown = position.screen_move(engine_move)
+            return Line(shown, move_notation(shown))
+
         bot = self._bot("main", spec)
         start = time.perf_counter()
         move = bot.get_move(state)
         info = getattr(bot, "last_info", None) or {}
-        analysis = Analysis(position, [Line(move, move_notation(move), Eval.from_info(info, me, spec.label()))],
+        first = line(move)
+        first.eval = Eval.from_info(info, me, spec.label())
+        analysis = Analysis(position, [first],
                             depth=int(info.get("depth_reached", 0)), nodes=int(info.get("nodes", 0)),
                             seconds=time.perf_counter() - start, engine=_engine_name(spec, info))
         if self._stale(generation):
@@ -179,20 +186,20 @@ class Analyzer:
                 return
             board = position.to_board()
             board.apply_move(me, cand)
-            line = Line(cand, move_notation(cand))
+            ln = line(cand)
             if isinstance(cand, PawnMove) and cand.row == board.goal_row(me):
-                line.eval = Eval(me, mate=1)
+                ln.eval = Eval(me, mate=1)
             else:
                 child = board.snapshot(1 - me, move_number=3)
                 reply = child_bot.get_move(child)
-                line.reply = move_notation(reply)
+                ln.reply = move_notation(position.screen_move(reply))
                 ev = Eval.from_info(getattr(child_bot, "last_info", None), 1 - me)
                 if ev is not None:
                     ev = ev.for_player(me)
                     if ev.mate is not None and ev.mate > 0:
                         ev = replace(ev, mate=ev.mate + 1)  # plus the candidate move itself
-                    line.eval = ev
-            lines.append(line)
+                    ln.eval = ev
+            lines.append(ln)
         if self._stale(generation):
             return
         best = lines[0]

@@ -21,11 +21,22 @@ except ImportError:  # pragma: no cover
 if cv2 is not None:
     from quoridor.vision.analysis import Analyzer
     from quoridor.vision.capture import ScreenWatcher
-    from quoridor.vision.parser import BLUE, RED, Profile, ScreenParser, annotate, find_board
+    from quoridor.vision.parser import (BLUE, RED, ParseResult, Profile, ScreenParser, annotate, find_board,
+                                        parse_move_rows)
     from quoridor.vision.position import Position, PositionTracker, move_notation, mover_between, parse_notation
     from quoridor.vision.synthetic import DARK, LIGHT, render, render_state
 
 needs_cv = unittest.skipUnless(cv2 is not None, "opencv-python / numpy not installed")
+
+
+def have_tesseract() -> bool:
+    try:
+        import pytesseract
+
+        pytesseract.get_tesseract_version()
+        return True
+    except Exception:
+        return False
 NO_OCR = dict(ocr=False)  # the tests check the tick bars; OCR is optional and slow
 
 
@@ -189,6 +200,147 @@ class TestParser(unittest.TestCase):
         self.assertIn("red_hues", Profile().to_json())
 
 
+def position_of(board: Board, turn, flipped=False):
+    """The board as a screen Position; ``flipped`` shows it with Red starting at the top."""
+    pos = Position((board.pawns[0], board.pawns[1]), walls_of(board), tuple(board.walls_left), turn)
+    return pos.mirrored() if flipped else pos
+
+
+def rows(*texts, xs=(10, 60, 150), pitch=30):
+    """OCR-like word rows for parse_move_rows: words of a row at the column positions ``xs``."""
+    out = []
+    for i, text in enumerate(texts):
+        out.append([(float(xs[j]), float(40 + i * pitch), 14.0, w) for j, w in enumerate(text.split())])
+    return out
+
+
+@needs_cv
+class TestOrientation(unittest.TestCase):
+    """Which player starts where, read from the tint of the two edge rows."""
+
+    def parse(self, image, **profile):
+        return ScreenParser(Profile(**{**NO_OCR, **profile})).parse(image)
+
+    def test_tint_tells_the_home_rows(self):
+        for theme in (DARK, LIGHT):
+            for layout in ("classic", "timed"):
+                normal, _ = render(theme=theme, layout=layout)
+                flipped, _ = render(pawns=((0, 4), (8, 4)), flipped=True, theme=theme, layout=layout)
+                self.assertIs(self.parse(normal).flipped, False)
+                self.assertIs(self.parse(flipped).flipped, True)
+        plain, _ = render(tint=False)
+        self.assertIsNone(self.parse(plain).flipped)
+        # a UI that shades the goal rows instead of the home rows
+        flipped, _ = render(pawns=((0, 4), (8, 4)), flipped=True)
+        self.assertIs(self.parse(flipped, tint_marks="goal").flipped, False)
+
+    def test_tint_is_read_with_pawns_and_walls_on_the_edge_rows(self):
+        image, _ = render(pawns=((0, 2), (8, 7)), flipped=True, walls=[(0, 0, "h"), (7, 5, "h"), (0, 4, "v")],
+                          walls_left=(9, 8), hints=[(8, 6), (8, 8), (7, 7)])
+        res = self.parse(image)
+        self.assertTrue(res.ok, res.reason)
+        self.assertIs(res.flipped, True)
+        self.assertEqual(res.pawns, ((0, 2), (8, 7)))
+
+    def test_flipped_random_positions_in_the_timed_layout(self):
+        rng = random.Random(11)
+        layouts = [dict(cell=56, gap=12, origin=(90, 110), size=(1280, 800)),
+                   dict(cell=44, gap=8, origin=(40, 70), size=(1100, 680)),
+                   dict(cell=80, gap=12, origin=(200, 120), size=(1920, 1080))]
+        for i in range(18):
+            board, turn = random_position(rng, rng.randrange(0, 70))
+            flipped = i % 3 != 0
+            pos = position_of(board, turn, flipped)
+            local = BLUE if flipped else RED       # the bottom player sees the outlines
+            hints = []
+            if turn == local and pos.winner is None:
+                hints = [(m.row, m.col) for m in (pos.screen_move(PawnMove(r, c))
+                                                  for r, c in board.valid_pawn_moves(turn))]
+            image, _ = render(pawns=pos.pawns, walls=pos.walls, walls_left=pos.walls_left, turn=turn, hints=hints,
+                              flipped=flipped, layout="timed", theme=(DARK, LIGHT)[i % 2],
+                              low_time=RED if i % 4 == 0 else None, **layouts[i % 3])
+            res = self.parse(image)
+            label = f"position {i}"
+            self.assertTrue(res.ok, f"{label}: {res.reason}")
+            self.assertIs(res.flipped, flipped, label)
+            self.assertEqual((res.pawns, res.walls, res.walls_left), (pos.pawns, pos.walls, pos.walls_left), label)
+            self.assertIsNone(res.border_turn, label)          # no green border in this layout
+            self.assertEqual(set(res.hints), set(hints), label)
+            self.assertIn(res.hint_turn, (None, turn), label)
+            self.assertEqual(res.warnings, [], label)
+
+
+@needs_cv
+class TestTimedSidebar(unittest.TestCase):
+    """Clocks, a move list and a chat box between the cards must not disturb the wall counts."""
+
+    def test_wall_counts_with_clocks_move_list_and_chat(self):
+        parser = ScreenParser(Profile(**NO_OCR))
+        for walls_left in ((10, 10), (7, 4), (0, 10), (10, 0), (1, 3), (0, 0)):
+            placed = [(r, c, "h") for r in (0, 2, 4, 6) for c in (0, 2, 4, 6)] + [(r, 8, "h") for r in ()]
+            placed = (placed + [(r, 7, "v") for r in (1, 3, 5, 7)])[:20 - sum(walls_left)]
+            for flipped in (False, True):
+                for low_time in (None, RED):  # a red clock is not a row of wall ticks
+                    image, _ = render(walls=placed, walls_left=walls_left, layout="timed", flipped=flipped,
+                                      pawns=((0, 4), (8, 4)) if flipped else ((8, 4), (0, 4)), low_time=low_time,
+                                      moves=["e2", "e8", "e3", "e7", "d3h"])
+                    res = parser.parse(image)
+                    label = f"{walls_left} flipped={flipped} low_time={low_time}"
+                    self.assertTrue(res.ok, f"{label}: {res.reason}")
+                    self.assertEqual(res.walls_left, walls_left, label)
+                    self.assertTrue(res.walls_consistent, label)
+                    # the icons are the ones in the cards (top and bottom), not the chat's
+                    tops = sorted(card.dot[1] for card in res.cards)
+                    board = res.geometry.board_rect()
+                    self.assertLess(tops[0], board[1] + res.geometry.pitch, label)
+                    self.assertGreater(tops[1], board[3] - 2.5 * res.geometry.pitch, label)
+
+    @unittest.skipUnless(have_tesseract(), "pytesseract / Tesseract not installed")
+    def test_text_readout_and_move_list_with_ocr(self):
+        moves = ["e2", "e8", "e3", "e7", "d7h", "e6", "f3", "e5h", "b2h", "a8v", "c3"]
+        for plies in (4, 5, 8, 9, 11):
+            image, _ = render(layout="timed", moves=moves[:plies], walls_left=(8, 7),
+                              walls=[(1, 1, "h"), (4, 4, "v"), (6, 2, "h"), (3, 6, "h"), (6, 6, "v")])
+            res = ScreenParser().parse(image)  # a new parser: a running one re-reads the list at most ~1x/s
+            self.assertTrue(res.ok, res.reason)
+            self.assertEqual(res.move_list_turn, plies % 2, f"{plies} moves: last row '{res.move_list_last}'")
+            self.assertEqual(res.turn_source, "move list")
+            self.assertEqual((res.cards[RED].ocr_count, res.cards[BLUE].ocr_count), (8, 7))  # not the clocks
+            self.assertEqual(res.walls_left, (8, 7))
+
+
+@needs_cv
+class TestMoveList(unittest.TestCase):
+    def test_one_or_two_moves_in_the_last_row(self):
+        self.assertEqual(parse_move_rows(rows("1. f1 e8", "2. f2 e7", "3. f3")), (BLUE, 5, "3. f3"))
+        self.assertEqual(parse_move_rows(rows("1. f1 e8", "2. f2 e7", "3. f3 e6")), (RED, 6, "3. f3 e6"))
+        self.assertEqual(parse_move_rows(rows("1. e2 e8"))[0], RED)
+        self.assertEqual(parse_move_rows(rows("7. e2 e8", "8. d3h a7v", "9. e3"))[:2], (BLUE, 17))  # scrolled list
+
+    def test_misread_characters(self):
+        # row numbers and moves garbled by OCR: the columns still tell how many moves the last row has
+        self.assertEqual(parse_move_rows(rows("al fl e8", "2. f2 e7", "S. 7"))[0], BLUE)
+        self.assertEqual(parse_move_rows(rows("1. f1 e8", "RS f2 e7", "3. f3 &6"))[0], RED)
+        # the last row lost its first move: the remaining word stands in the second column
+        last = [(10.0, 100.0, 14.0, "3."), (150.0, 100.0, 14.0, "e6")]
+        self.assertEqual(parse_move_rows(rows("1. f1 e8", "2. f2 e7") + [last])[0], RED)
+
+    def test_other_text_around_the_list(self):
+        chat = [[(10.0, 300.0, 14.0, "Chat")], [(10.0, 330.0, 14.0, "gg"), (60.0, 330.0, 14.0, "e4"),
+                                                (150.0, 330.0, 14.0, "next?")]]
+        header = [[(10.0, 10.0, 14.0, "Moves")]]
+        self.assertEqual(parse_move_rows(header + rows("1. f1 e8", "2. f2") + chat)[0], BLUE)
+        clock = [[(10.0, 5.0, 14.0, "5:02")], [(10.0, 400.0, 14.0, "4:32")]]
+        self.assertEqual(parse_move_rows(clock + rows("1. f1 e8", "2. f2 e7"))[0], RED)
+
+    def test_abstains_when_unsure(self):
+        self.assertIsNone(parse_move_rows([]))
+        self.assertIsNone(parse_move_rows(rows("Chat", "good luck")))
+        self.assertIsNone(parse_move_rows(rows("1. e8")))               # or "1. e8 e2" with a word lost?
+        # a third row of which only the number was read
+        self.assertIsNone(parse_move_rows(rows("1. f1 e8", "2. f2 e7", "3.")))
+
+
 @needs_cv
 class TestNotation(unittest.TestCase):
     def test_squares_and_walls(self):
@@ -286,6 +438,111 @@ class TestTracker(unittest.TestCase):
 
 
 @needs_cv
+class TestFlippedPositions(unittest.TestCase):
+    def test_goals_follow_the_orientation(self):
+        normal = Position(((8, 4), (0, 4)), (), (10, 10), RED)
+        flipped = Position(((0, 4), (8, 4)), (), (10, 10), RED, flipped=True)
+        self.assertEqual((normal.home_rows, normal.goal_rows), ((8, 0), (0, 8)))
+        self.assertEqual((flipped.home_rows, flipped.goal_rows), ((0, 8), (8, 0)))
+        self.assertIsNone(flipped.winner)                      # Red on row 0 is at home here, not at its goal
+        self.assertEqual(Position(((8, 3), (5, 4)), (), (10, 10), BLUE, flipped=True).winner, RED)
+        self.assertEqual(Position(((0, 3), (5, 4)), (), (10, 10), BLUE).winner, RED)
+        self.assertEqual(flipped.mirrored(), normal)
+        self.assertEqual(normal.mirrored().mirrored(), normal)
+
+    def test_bots_see_a_flipped_board_mirrored(self):
+        # Red at the top with a wall right below it, Blue at the bottom
+        pos = Position(((1, 4), (8, 4)), ((1, 4, "h"),), (10, 9), RED, flipped=True)
+        board = pos.to_board()
+        self.assertEqual(board.pawns, [(7, 4), (0, 4)])
+        self.assertEqual(board.walls, {(6, 4, Orientation.HORIZONTAL)})
+        self.assertTrue(board.is_blocked((7, 4), (6, 4)))       # the wall is still in front of Red
+        self.assertEqual(board.walls_left, [10, 9])
+        self.assertEqual(pos.screen_move(PawnMove(6, 3)), PawnMove(2, 3))
+        self.assertEqual(pos.screen_move(WallMove(6, 4, Orientation.HORIZONTAL)),
+                         WallMove(1, 4, Orientation.HORIZONTAL))
+        self.assertEqual(pos.screen_move(WallMove(0, 2, Orientation.VERTICAL)), WallMove(7, 2, Orientation.VERTICAL))
+        self.assertIsNone(pos.error())
+
+    def test_parity(self):
+        self.assertEqual(Position(((8, 4), (0, 4)), (), (10, 10)).parity_turn(), RED)            # no move yet
+        self.assertEqual(Position(((7, 4), (0, 4)), (), (10, 10)).parity_turn(), BLUE)           # 1. e2
+        self.assertEqual(Position(((7, 4), (0, 4)), ((0, 3, "h"),), (10, 9)).parity_turn(), RED)  # 1. e2 d8h
+        self.assertEqual(Position(((0, 4), (8, 4)), (), (10, 10), flipped=True).parity_turn(), RED)
+        self.assertEqual(Position(((1, 4), (8, 4)), (), (10, 10), flipped=True).parity_turn(), BLUE)
+
+
+@needs_cv
+class TestTimedTracker(unittest.TestCase):
+    """No green border: the turn comes from the move list, the outlines, history or parity."""
+
+    def setUp(self):
+        self.parser = ScreenParser(Profile(**NO_OCR))
+        self.tracker = PositionTracker(stable_frames=2, unsure_frames=4)
+
+    def feed(self, times=3, **kwargs):
+        kwargs.setdefault("layout", "timed")
+        image, _ = render(**kwargs)
+        out = [self.tracker.update(self.parser.parse(image)) for _ in range(times)]
+        return [p for p in out if p is not None]
+
+    def test_parity_then_history(self):
+        got = self.feed()
+        self.assertEqual([(p.turn, p.flipped) for p in got], [(RED, False)])
+        self.assertEqual((self.tracker.turn_source, self.tracker.orientation_source), ("parity", "tint"))
+        got = self.feed(pawns=((7, 4), (0, 4)))
+        self.assertEqual([p.turn for p in got], [BLUE])
+        self.assertEqual(self.tracker.turn_source, "history")
+
+    def test_outlines_on_a_flipped_board(self):
+        # Blue (bottom, the local player) is to move after 1. e8: its legal moves are outlined
+        got = self.feed(pawns=((1, 4), (8, 4)), flipped=True, hints=[(7, 4), (8, 3), (8, 5)])
+        self.assertEqual([(p.turn, p.flipped) for p in got], [(BLUE, True)])
+        self.assertEqual(self.tracker.turn_source, "outlines")
+        self.assertEqual(got[0].goal_rows, (8, 0))
+
+    def test_parity_learns_from_a_jump(self):
+        # Started watching mid-game: Red e4, Blue e5 face to face, Blue to move (7 moves played).
+        self.assertEqual([p.turn for p in self.feed(pawns=((5, 4), (4, 4)))], [BLUE])
+        # Blue jumps over Red: seen as Blue's move, although the parity rule alone says "Blue again".
+        got = self.feed(pawns=((5, 4), (6, 4)))
+        self.assertEqual([p.turn for p in got], [RED])
+        self.assertEqual(self.tracker.turn_source, "history")
+        # Two moves pass unseen (covered window): parity, corrected for the jump, still gives Red.
+        got = self.feed(pawns=((5, 3), (7, 4)))
+        self.assertEqual([p.turn for p in got], [RED])
+        self.assertEqual(self.tracker.turn_source, "parity")
+
+    def test_orientation_without_tint(self):
+        got = self.feed(pawns=((1, 4), (7, 4)), flipped=True, tint=False)
+        self.assertTrue(got[0].flipped)                       # guessed: each pawn is still on its own side
+        self.assertEqual(self.tracker.orientation_source, "pawns")
+        got = self.feed(pawns=((5, 4), (7, 4)), flipped=True, tint=False)
+        self.assertTrue(got[0].flipped)                       # and remembered later in the game
+        self.tracker.forced_flipped = False
+        self.assertFalse(self.feed(pawns=((5, 4), (7, 3)), flipped=True, tint=False)[0].flipped)
+
+    def test_move_list_that_lags_behind_the_board(self):
+        def frame(pawns, list_turn):
+            return ParseResult(ok=True, pawns=pawns, walls=(), walls_left=(10, 10), walls_consistent=True,
+                               flipped=False, move_list_turn=list_turn, move_list_last="x")
+
+        def feed(res, times):
+            return [p for p in (self.tracker.update(res) for _ in range(times)) if p is not None]
+
+        self.assertEqual([p.turn for p in feed(frame(((8, 4), (0, 4)), RED), 3)], [RED])
+        self.assertEqual(self.tracker.turn_source, "move list")
+        # Red has moved but the list still shows the old row: wait for it ...
+        self.assertEqual(feed(frame(((7, 4), (0, 4)), RED), 3), [])
+        # ... it updates
+        self.assertEqual([p.turn for p in feed(frame(((7, 4), (0, 4)), BLUE), 2)], [BLUE])
+        # A list row that stays misread is overruled by the move that was seen
+        got = feed(frame(((7, 4), (1, 4)), BLUE), 6)
+        self.assertEqual([p.turn for p in got], [RED])
+        self.assertEqual(self.tracker.turn_source, "history")
+
+
+@needs_cv
 class TestAnalyzer(unittest.TestCase):
     def analyse(self, position, spec, timeout=20):
         results, done = [], threading.Event()
@@ -325,6 +582,27 @@ class TestAnalyzer(unittest.TestCase):
 
     def test_python_search(self):
         self.check_lines(BotSpec(depth=4, engine="py"))
+
+    def check_flipped(self, spec):
+        # Red started at the top and is one step from its goal, the bottom row.
+        win = self.analyse(Position(((7, 4), (2, 4)), (), (0, 0), RED, flipped=True), spec)
+        self.assertEqual((win.best.notation, win.eval.text()), ("e1", "M1"))
+        self.assertEqual(win.best.move, PawnMove(8, 4))
+        blue = self.analyse(Position(((4, 4), (1, 4)), (), (0, 0), BLUE, flipped=True), spec)
+        self.assertEqual((blue.best.notation, blue.eval.text()), ("e9", "M1"))
+        # Same game as the unflipped start position, seen upside down: mirrored answers.
+        normal = self.analyse(Position(((8, 4), (0, 4)), ((6, 3, "h"),), (10, 9), RED), spec)
+        mirrored = self.analyse(Position(((0, 4), (8, 4)), ((1, 3, "h"),), (10, 9), RED, flipped=True), spec)
+        self.assertEqual(mirrored.eval.text(), normal.eval.text())
+        self.assertEqual(mirrored.best.move, Position((), (), (0, 0), flipped=True).screen_move(normal.best.move))
+        self.assertTrue(all(ln.reply for ln in mirrored.lines))
+
+    def test_flipped_board_python(self):
+        self.check_flipped(BotSpec(depth=4, engine="py"))
+
+    @unittest.skipUnless(engine_available(), "C++ engine not built")
+    def test_flipped_board_cpp(self):
+        self.check_flipped(BotSpec(depth=6))
 
     @unittest.skipUnless(engine_available(), "C++ engine not built")
     def test_cpp_engine(self):

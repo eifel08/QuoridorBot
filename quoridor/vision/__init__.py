@@ -22,10 +22,11 @@ def missing_hint(exc: ImportError) -> str:
 
 
 def run_assistant(spec=None, monitor: int = 1, fps: float = 5.0, profile_path: Optional[str] = None,
-                  debug: bool = False, overlay: bool = True, demo: bool = False) -> None:
+                  debug: bool = False, overlay: bool = True, demo: Optional[str] = None) -> None:
     """Open the Screen Assistant and run until its panel is closed.
 
-    ``demo`` also opens a self-playing mock game for the assistant to watch.
+    ``demo`` ("classic" or "timed") also opens a self-playing mock game in that layout for the
+    assistant to watch.
     """
     from .analysis import DEFAULT_SPEC
     from .app import AssistantApp
@@ -36,7 +37,7 @@ def run_assistant(spec=None, monitor: int = 1, fps: float = 5.0, profile_path: O
     if demo:
         from .demo import DemoGame
 
-        app.demo = DemoGame(app.root)
+        app.demo = DemoGame(app.root, layout=demo)
     app.run()
 
 
@@ -60,11 +61,15 @@ def check_image(path: str, out_path: Optional[str] = None, profile_path: Optiona
         x1, y1, x2, y2 = res.geometry.board_rect()
         print(f"Board at x {x1}-{x2}, y {y1}-{y2} (squares {res.geometry.side:.0f} px)")
     if res.ok:
-        pos = Position(res.pawns, res.walls, res.walls_left, res.turn)
+        pos = Position(res.pawns, res.walls, res.walls_left, res.turn, bool(res.flipped))
         print(pos.summary())
+        side = "no tinted edge rows seen" if res.flipped is None else (
+            "Red starts at the top" if res.flipped else "Red starts at the bottom")
+        print(f"Orientation: {side}")
         print(f"Walls left read from: {res.walls_source}; turn from: "
-              + ("card border" if res.border_turn is not None else
-                 "legal-move outlines" if res.hint_turn is not None else "not visible in a single frame"))
+              + (res.turn_source or f"move parity (a guess: {PLAYER_NAMES[pos.parity_turn()]})"))
+        if res.move_list_turn is not None:
+            print(f"Move list: last row '{res.move_list_last}'")
         for p in (1, 0):
             card = res.cards[p]
             print(f"  {PLAYER_NAMES[p]} card: {'found' if card.dot else 'NOT found'}, ticks {card.tick_count}, "

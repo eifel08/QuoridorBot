@@ -287,6 +287,7 @@ class AssistantApp:
         self.engine_var = tk.StringVar(value={"auto": "Auto", "cpp": "C++", "py": "Python"}[self.spec.engine])
         self.advise_var = tk.StringVar(value="Both sides")
         self.turn_var = tk.StringVar(value="Auto")
+        self.side_var = tk.StringVar(value="Auto")
         self.overlay_var = tk.BooleanVar(value=overlay)
         self.debug_var = tk.BooleanVar(value=debug)
         rows = [("Depth", ttk.Spinbox(box, from_=1, to=30, width=8, textvariable=self.depth_var,
@@ -300,7 +301,9 @@ class AssistantApp:
                 ("Show move for", ttk.Combobox(box, width=10, textvariable=self.advise_var, state="readonly",
                                                values=("Both sides", "Red", "Blue"))),
                 ("Side to move", ttk.Combobox(box, width=10, textvariable=self.turn_var, state="readonly",
-                                              values=("Auto", "Red", "Blue")))]
+                                              values=("Auto", "Red", "Blue"))),
+                ("Red starts at", ttk.Combobox(box, width=10, textvariable=self.side_var, state="readonly",
+                                               values=("Auto", "Bottom", "Top")))]
         if self.spec.kind != "ab":
             rows = rows[4:]
             self._label(box, f"Bot: {self.spec.label()}", DIM, 9).grid(row=0, column=0, columnspan=2, sticky="w",
@@ -329,6 +332,7 @@ class AssistantApp:
         forced = {"Auto": None, "Red": RED, "Blue": BLUE}[self.turn_var.get()]
         if forced != self.tracker.forced_turn:
             self.tracker.forced_turn = forced
+        self.tracker.forced_flipped = {"Auto": None, "Bottom": False, "Top": True}[self.side_var.get()]
         if self.spec.kind != "ab":
             return
         try:
@@ -429,8 +433,9 @@ class AssistantApp:
                                    fg=(RED_HEX, BLUE_HEX)[pos.turn] if pos.turn is not None else WARN)
             self.blue_label.config(text=f"Blue walls left: {pos.walls_left[BLUE]}/10")
             self.red_label.config(text=f"Red walls left: {pos.walls_left[RED]}/10")
-            self.pos_label.config(text=pos.summary().split(", ")[0] + " · " + pos.summary().split(", ")[1]
-                                  + f" · {len(pos.walls)} walls on board")
+            parts = pos.summary().split(", ")
+            side = f"Red starts at the {'top' if pos.flipped else 'bottom'} (from {self.tracker.orientation_source})"
+            self.pos_label.config(text=f"{parts[0]} · {parts[1]} · {len(pos.walls)} walls on board\n{side}")
         else:
             self.turn_label.config(text="Turn: -", fg=TEXT)
             self.blue_label.config(text="Blue walls left: -")
@@ -449,7 +454,7 @@ class AssistantApp:
     def _show_analysis(self, analysis: Optional[Analysis], searching: Optional[Position],
                        pos: Optional[Position]) -> None:
         ev = analysis.eval if analysis else None
-        self._draw_bar(ev.red_share() if ev else None)
+        self._draw_bar(ev.red_share() if ev else None, bool(pos and pos.flipped))
         if analysis is None or analysis.best is None:
             thinking = searching is not None and pos is not None
             self.eval_label.config(text="..." if thinking else "-", fg=TEXT)
@@ -484,16 +489,18 @@ class AssistantApp:
         self.info_label.config(text=f"{analysis.engine} · depth {analysis.depth} · {nodes} positions · "
                                     f"{analysis.seconds:.2f} s")
 
-    def _draw_bar(self, red_share: Optional[float]) -> None:
+    def _draw_bar(self, red_share: Optional[float], flipped: bool = False) -> None:
+        """Each colour fills from its own home side: Red from the bottom unless the board is flipped."""
         c = self.bar
         w, h = int(c["width"]), int(c["height"])
         c.delete("all")
         if red_share is None:
             c.create_rectangle(0, 0, w, h, fill=CARD, outline="")
             return
-        split = round(h * (1 - red_share))
-        c.create_rectangle(0, 0, w, split, fill=BLUE_HEX, outline="")      # Blue from the top
-        c.create_rectangle(0, split, w, h, fill=RED_HEX, outline="")       # Red from the bottom
+        top, bottom = (RED_HEX, BLUE_HEX) if flipped else (BLUE_HEX, RED_HEX)
+        split = round(h * (red_share if flipped else 1 - red_share))
+        c.create_rectangle(0, 0, w, split, fill=top, outline="")
+        c.create_rectangle(0, split, w, h, fill=bottom, outline="")
         c.create_line(0, h // 2, w, h // 2, fill=BG, width=2)
 
     def _show_overlay(self, frame: Optional[Frame], analysis: Optional[Analysis]) -> None:

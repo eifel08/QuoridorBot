@@ -145,13 +145,15 @@ The first installs `mss` (screen capture), `opencv-python` and `numpy`. The seco
 C++ engine; without it the assistant uses the slower Python search. The windows use Tk, which
 comes with Python on Windows and macOS (Linux: `sudo apt install python3-tk`).
 Optional: `pip install pytesseract` plus the [Tesseract](https://github.com/tesseract-ocr/tesseract)
-program lets the assistant also read the `X/10` wall counters as text.
+program lets the assistant also read the `X/10` wall counters and the move list as text. It
+is recommended for timed / online games, where the move list is the best turn indicator.
 
 | Command | What it does |
 |---|---|
 | `python main.py --assistant` | start the assistant with the default bot (`ab:depth=30,time=1`) |
 | `python main.py --assistant ab:depth=8,time=3,walls=attack` | choose the bot ([spec format](#bot-settings); `ml:model=best.pt` works too) |
 | `python main.py --assistant-demo` | assistant plus a self-playing mock game, to try it without a real game |
+| `python main.py --assistant-demo timed` | the same with the online layout: clocks, move list, chat, no green border, Blue at the bottom |
 | `python main.py --assistant --debug-preview` | open the calibration preview at start |
 | `python main.py --assistant --monitor 2` | watch the second monitor (`0` = all monitors) |
 | `python main.py --assistant-image shot.png` | parse a saved screenshot, print what was read, write `shot.parsed.png` |
@@ -165,13 +167,22 @@ can be changed in the panel while it runs; the current position is searched agai
 
 ### What it expects on screen
 
+Two variants of the same UI are supported, and they are told apart automatically.
+
+![Screen Assistant on the timed layout with Blue at the bottom](docs/assistant-timed.png)
+
 - **Board, left:** a 9x9 grid of square cells with gaps between them, files `a`-`i` under it
-  and ranks `1`-`9` on its right. The **blue** pawn starts at the top (`e9`), the **red** pawn
-  at the bottom (`e1`). Walls sit in the gaps and may have any colour. The white/grey outlines
-  on legal target squares are ignored when looking for pawns and walls.
-- **Player cards, right of the board:** Blue's card above Red's, each with a dot in the
-  player's colour, a bar of wall ticks and an `X/10` readout.
-- **Turn:** the card with the **green border** belongs to the player to move.
+  and ranks `1`-`9` on its right. One red and one blue pawn. Walls sit in the gaps and may have
+  any colour. The white/grey outlines on legal target squares are ignored when looking for pawns
+  and walls.
+- **Orientation:** either player can be at the bottom. Each player's **home row** (top row or
+  bottom row) is shaded in that player's colour, which tells who started where and therefore
+  which row each player has to reach.
+- **Player cards, right of the board:** one at the top and one at the bottom, each with a dot
+  in the player's colour, a bar of wall ticks and an `X/10` readout.
+- **Local games:** the card of the player to move has a **green border**.
+- **Timed / online games:** no green border. The cards also show clocks (`5:02`), and a move
+  list (`1. f1 e8`, `2. f2 e7`, `3. f3`) and a chat box sit between the two cards.
 
 The board and the cards are found automatically, at any position and size (squares of about
 35 px or more), in light and dark themes. Nothing has to be clicked or measured.
@@ -181,23 +192,48 @@ The board and the cards are found automatically, at any position and size (squar
 | What | How |
 |---|---|
 | Board | a 9x9 lattice of equal squares is searched on the whole screen once; afterwards only that spot is re-checked each frame, and the search runs again if the board moves |
+| Orientation | the top and the bottom row are compared with the rows in between: the redder one is Red's home row. Without any tint the first position decides (each pawn is still on its own side) and is remembered; *Red starts at* in the panel overrides it |
 | Pawns | the cell whose centre is red / blue and differs from the cell's own corners |
 | Walls | each groove segment is compared with the usual groove colour; occupied segments are paired into walls. A half-placed or hovering wall makes the frame "not readable" and is skipped |
-| Walls left | the tick bar of each card; the `X/10` text if pytesseract is installed; both are checked against the number of walls on the board (`20 - blue - red`). If one card can't be read, its count comes from the board |
-| Turn | 1. green card border, 2. legal-move outlines (they must be legal moves of exactly one player), 3. what changed since the previous position (a moved pawn or a spent wall tells who just moved). *Side to move* in the panel overrides all three |
+| Player cards | the round blob of each colour that has a row of wall ticks next to it. Coloured dots in the chat, avatars or a red clock are not mistaken for it; with no ticks left, the two blobs farthest apart are the cards |
+| Walls left | the tick bar of each card; the `X/10` text if pytesseract is installed (clock times such as `5:02` don't match it); both are checked against the number of walls on the board (`20 - blue - red`). If one card can't be read, its count comes from the board |
+
+**Side to move**, first match wins:
+
+1. *Side to move* chosen in the panel.
+2. **Green card border** (local games).
+3. **Move list** (needs pytesseract): Red moves first, so a last row with one move
+   (`3. f3`) means Blue is to move, and a full row (`3. f3 e6`) means Red is. The reader goes by
+   the columns the words stand in, so a misread character does not matter, and it gives no
+   answer rather than a doubtful one (for example when only a row's number was readable).
+4. **Legal-move outlines** on the board, when they are legal moves of exactly one player.
+5. **History:** the move that was just seen being made (a moved pawn or a spent wall).
+6. **Move parity:** Red moves first, so with an even number of moves played it is Red's turn.
+   Moves played = walls placed (`(10 - red) + (10 - blue)`) + pawn steps, with the pawn steps
+   estimated from each pawn's distance to its start square. A jump over the other pawn breaks
+   that estimate; once the assistant has seen a move being made it corrects for this.
+
+If the move list or the parity rule names the player who was just seen moving, the assistant
+waits a few frames for the list to catch up and otherwise trusts the move it saw.
 
 A position is passed to the engine only when it has been identical for two frames and differs
 from the last one searched, so identical frames and sliding pawns cost nothing. If the
-indicators contradict each other (wall counts don't add up, or the border still marks the
+indicators contradict each other (wall counts don't add up, or an indicator still marks the
 player who just moved) it waits a few more frames first. A new position cancels the search
 that is still running.
 
+The bots always think with Red moving up the board. A flipped game is mirrored top to bottom
+for them and their moves are mirrored back, so the marker and the notation always match what
+is on the screen (`e1` is the bottom row whoever owns it).
+
 ### Panel and overlay
 
-- **State:** turn (and where it was read from), walls left for Blue and Red, pawn squares.
+- **State:** turn (and where it was read from), walls left for Blue and Red, pawn squares, and
+  which side Red started on (and where that was read from).
 - **Evaluation:** the backed-up search score in the [same notation](#eval-display-desktop-window)
   as the desktop game: the big number is written from the side it favours, in that side's
-  colour, with the side to move's own score next to it.
+  colour, with the side to move's own score next to it. Each colour fills the bar from its own
+  home side, so the bar turns over with the board.
 - **Best move and alternatives** in board notation: `e2` is a pawn move to e2; `e3h` is a
   horizontal wall above e3 and f3; `d4v` is a vertical wall to the right of d4 and d5 (a wall is
   named after its lower-left square). Each line also shows the reply the engine expects.
@@ -227,7 +263,8 @@ walls left and warnings. `--assistant-image shot.png` produces the same picture 
 | a pawn or the turn is not found | the site's colours are outside the defaults: put the changed values in a JSON file and pass `--vision-profile` |
 | walls are missed or invented | lower or raise `wall_delta` in the profile |
 | wall counts are wrong | the preview shows which ticks were counted; install pytesseract for the text readout, or rely on the board check |
-| turn is wrong or unknown | set *Side to move* in the panel |
+| turn is wrong or unknown | the panel shows where the turn came from; install pytesseract for the move list, or set *Side to move* |
+| the players' directions are swapped | set *Red starts at* in the panel; if the UI shades the goal rows instead of the home rows, put `"tint_marks": "goal"` in the profile |
 
 Profile keys and defaults (hues are OpenCV's 0-179 scale):
 
@@ -242,13 +279,15 @@ Profile keys and defaults (hues are OpenCV's 0-179 scale):
   "wall_delta": 45.0,
   "hint_delta": 14.0,
   "sidebar_width": 1.3,
-  "ocr": true
+  "ocr": true,
+  "tint_delta": 6.0,
+  "tint_marks": "home"
 }
 ```
 
-The parser has been tested on mock screenshots of this layout (`quoridor/vision/synthetic.py`,
-`tests/test_vision.py`), not yet on the real site, so expect to check the preview once and
-possibly adjust the profile.
+The parser has been tested on mock screenshots of both variants and both orientations
+(`quoridor/vision/synthetic.py`, `tests/test_vision.py`), not yet on the real site, so expect to
+check the preview once and possibly adjust the profile.
 
 ## Bot vs Bot
 

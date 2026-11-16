@@ -17,18 +17,24 @@ and needs no pixel coordinates from the user:
    the two cards. Walls left are read from the tick bar, from the ``X/10``
    text when ``pytesseract`` is installed, and cross-checked against the
    number of walls on the board.
-5. **Turn.** The card with the green border is the player to move. The
-   legal-move outlines on the board are a second, independent indicator.
+5. **Orientation.** Each player's home row (top or bottom) is shaded in that
+   player's colour; the redder edge row is Red's (``ParseResult.flipped``).
+6. **Turn.** The card with the green border is the player to move. Timed /
+   online layouts have no border; there the numbered move list between the
+   cards is read (with ``pytesseract``): a last row with one move means the
+   second player, Blue, is to move. The legal-move outlines on the board are a
+   further, independent indicator. History and move parity are added by
+   :class:`~quoridor.vision.position.PositionTracker`.
 
-Coordinates follow the rest of the project: ``(row, col)`` with row 0 at the
-top; Red is player 0 (starts at the bottom, ``e1``), Blue is player 1 (starts
-at the top, ``e9``).
+Coordinates are screen coordinates: ``(row, col)`` with row 0 at the top. Red
+is player 0 and Blue player 1 whichever side they start on.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass, field, fields
 from typing import Optional, Sequence
 
@@ -65,7 +71,9 @@ class Profile:
     wall_delta: float = 45.0           # colour distance (BGR) between a wall and an empty groove
     hint_delta: float = 14.0           # brightness step of a legal-move outline
     sidebar_width: float = 1.3         # width of the area searched for the player cards, in board widths
-    ocr: bool = True                   # read "X/10" with pytesseract when it is installed
+    ocr: bool = True                   # read "X/10" and the move list with pytesseract when it is installed
+    tint_delta: float = 6.0            # how much redder one edge row must be than the other to tell the sides
+    tint_marks: str = "home"           # an edge row is tinted in the colour of its "home" player or its "goal" player
 
     @classmethod
     def load(cls, path: str) -> "Profile":
@@ -400,7 +408,11 @@ class ParseResult:
     walls_left: Optional[tuple[int, int]] = None       # (Red, Blue)
     walls_source: str = ""                             # "text", "ticks", "ticks+board", "board"
     walls_consistent: bool = False                     # sidebar counts agree with the walls on the board
+    flipped: Optional[bool] = None                     # True: Red's home row is the top row; None: no tint seen
     border_turn: Optional[int] = None                  # player whose card has the green border
+    move_list_turn: Optional[int] = None               # player to move according to the move list (needs OCR)
+    move_list_plies: Optional[int] = None              # moves played, when the row number was readable too
+    move_list_last: str = ""                           # its last row as read, e.g. "3. f3"
     hint_turn: Optional[int] = None                    # player whose legal moves are outlined
     hints: tuple[Square, ...] = ()
     active_rect: Optional[Rect] = None
@@ -411,7 +423,18 @@ class ParseResult:
     @property
     def turn(self) -> Optional[int]:
         """Player to move as far as this single frame shows it."""
-        return self.border_turn if self.border_turn is not None else self.hint_turn
+        for turn in (self.border_turn, self.move_list_turn, self.hint_turn):
+            if turn is not None:
+                return turn
+        return None
+
+    @property
+    def turn_source(self) -> str:
+        if self.border_turn is not None:
+            return "border"
+        if self.move_list_turn is not None:
+            return "move list"
+        return "outlines" if self.hint_turn is not None else ""
 
     def game_rect(self) -> Optional[Rect]:
         """Image rectangle holding the board and whatever was found of the player cards."""
@@ -442,6 +465,8 @@ class ScreenParser:
         self._ocr_cache: dict[bytes, Optional[int]] = {}
         self._tesseract = None  # None = not tried, False = unavailable
         self._samples = None
+        self._count_cache: dict = {}   # per card: crop, tick count, time, reading
+        self._moves_cache: tuple = (None, 0.0, None, None)  # crop bytes, time, board key, reading
 
     def reset(self) -> None:
         """Forget the board position (search the whole frame again)."""
@@ -487,13 +512,94 @@ class ScreenParser:
             res.reason = "; ".join(problems)
             return res
 
+        res.flipped = self._orientation(cells)
         res.hints = self._find_hints(bgr, g, res.pawns)
         res.hint_turn = _hint_turn(res)
         self._resolve_walls_left(res)
-        if res.border_turn is not None and res.hint_turn is not None and res.border_turn != res.hint_turn:
-            res.warnings.append("card border and legal-move outlines disagree about the turn")
+        if res.border_turn is None and self.profile.ocr:
+            self._read_move_list(bgr, g, res)
+        seen = {name: t for name, t in (("card border", res.border_turn), ("move list", res.move_list_turn),
+                                        ("legal-move outlines", res.hint_turn)) if t is not None}
+        if len(set(seen.values())) > 1:
+            res.warnings.append(" and ".join(seen) + " disagree about the turn")
         res.ok = True
         return res
+
+    # -- orientation ------------------------------------------------------
+    def _orientation(self, cells: np.ndarray) -> Optional[bool]:
+        """Is Red's home row the top row? Read from the tint of the two edge rows.
+
+        Each player's home row is shaded in that player's colour, so the redder
+        of the two edge rows (compared with the rows in between) is Red's.
+        """
+        middle = np.median(cells[1:N - 1].reshape(-1, 3), axis=0)
+        top = np.median(cells[0], axis=0) - middle
+        bottom = np.median(cells[N - 1], axis=0) - middle
+        redness = (top[2] - top[0]) - (bottom[2] - bottom[0])  # BGR: red minus blue
+        if abs(redness) < self.profile.tint_delta:
+            return None
+        red_on_top = bool(redness > 0)
+        return red_on_top if self.profile.tint_marks == "home" else not red_on_top
+
+    # -- move list -----------------------------------------------------------
+    def _read_move_list(self, bgr, g: Geometry, res: ParseResult) -> None:
+        """Count the moves in a numbered move list between the two cards ("3. f3" = 5 moves played)."""
+        if not self._have_tesseract() or res.sidebar is None:
+            return
+        spans = []
+        for card in res.cards:
+            parts = ([card.dot] if card.dot else []) + card.ticks
+            if not parts:
+                return
+            spans.append((min(r[1] for r in parts), max(r[3] for r in parts)))
+        spans.sort()
+        x1, _, x2, _ = res.sidebar
+        x1 = max(x1, round(min(card.dot[0] for card in res.cards if card.dot) - 0.6 * g.pitch))  # not the rank labels
+        y1, y2 = round(spans[0][1] + 0.3 * g.pitch), round(spans[1][0] - 0.3 * g.pitch)
+        if y2 - y1 < g.pitch:
+            return
+        crop = bgr[y1:y2, x1:x2]
+        key = crop.tobytes()
+        board_key = (res.pawns, res.walls)
+        old_key, stamp, old_board, reading = self._moves_cache
+        now = time.monotonic()
+        # OCR is slow: only when the area changed, and not more than about once a
+        # second unless the board itself changed (a ticking clock would cost a lot).
+        if key != old_key and (board_key != old_board or now - stamp > 0.7):
+            reading = self._ocr_move_list(crop, g)
+            self._moves_cache = (key, now, board_key, reading)
+        if reading is not None:
+            res.move_list_turn, res.move_list_plies, res.move_list_last = reading
+
+    def _ocr_move_list(self, crop: np.ndarray, g: Geometry) -> Optional[tuple[int, Optional[int], str]]:
+        gray = _for_ocr(crop, min(4.0, max(1.5, 160 / g.pitch)))
+        try:
+            data = self._tesseract.image_to_data(gray, config="--psm 6", output_type=self._tesseract.Output.DICT)
+        except Exception:
+            return None
+        lines: dict[tuple, list[Word]] = {}
+        for i, word in enumerate(data["text"]):
+            if word.strip():
+                key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
+                lines.setdefault(key, []).append(
+                    (float(data["left"][i]), data["top"][i] + data["height"][i] / 2, float(data["height"][i]),
+                     word.strip()))
+        return parse_move_rows([sorted(words) for words in lines.values()])
+
+    def _have_tesseract(self) -> bool:
+        if self._tesseract is None:
+            try:
+                import os
+
+                import pytesseract
+
+                # one thread is enough for these small pictures and leaves the cores to the engine
+                os.environ.setdefault("OMP_THREAD_LIMIT", "1")
+                pytesseract.get_tesseract_version()
+                self._tesseract = pytesseract
+            except Exception:
+                self._tesseract = False
+        return bool(self._tesseract)
 
     # -- pawns ----------------------------------------------------------
     def _find_pawns(self, bgr, masks, cells, g: Geometry):
@@ -577,14 +683,50 @@ class ScreenParser:
             return
         res.sidebar = (x1, y1, x2, y2)
         comps = [_components(masks[p][y1:y2, x1:x2], x1, y1, min_area=(0.06 * g.pitch) ** 2) for p in (RED, BLUE)]
-        dots: list[Optional[Rect]] = []
+        # A card icon is a round blob in the player's colour. Chat messages, avatars
+        # or a red clock can add more blobs of that colour, so prefer the blob
+        # that has a row of wall ticks next to it.
+        solid: list[list[Rect]] = []
         for p in (RED, BLUE):
-            round_ones = [(rect, area) for rect, area in comps[p] if _is_round(rect, area, g.pitch)]
-            # the icon is in the card's header line: the topmost round blob of that colour
-            dots.append(min(round_ones, key=lambda ra: ra[0][1])[0] if round_ones else None)
-            res.cards[p].dot = dots[p]
+            filled = [rect for rect, area in comps[p] if area >= 0.7 * (rect[2] - rect[0]) * (rect[3] - rect[1])]
+            glyphs = [rect for rect, area in comps[p] if rect not in filled]
+            # a filled blob with letters or digits of the same colour beside it is part
+            # of that text (the "1" of a red clock), not a wall tick
+            solid.append([t for t in filled if not any(
+                min(t[3], b[3]) - max(t[1], b[1]) > 0.5 * (t[3] - t[1])
+                and max(t[0], b[0]) - min(t[2], b[2]) < 0.8 * g.pitch for b in glyphs)])
+        choices: list[list[tuple[Rect, list[Rect]]]] = []
+        for p in (RED, BLUE):
+            options = []
+            for rect, area in comps[p]:
+                if _is_round(rect, area, g.pitch):
+                    near = [t for t in solid[p] if t != rect and t[1] >= rect[1] - (rect[3] - rect[1])
+                            and t[3] <= rect[3] + 2.2 * g.pitch]
+                    options.append((rect, _tick_group(near, bgr, hsv)))
+            choices.append(sorted(options, key=lambda o: o[0][1]))
+        picked: list[Optional[tuple[Rect, list[Rect]]]] = [None, None]
+        strong = [max(opts, key=lambda o: len(o[1])) if opts else None for opts in choices]
+        strong = [o if o is not None and len(o[1]) >= 2 else None for o in strong]
+        for p in (RED, BLUE):
+            if not choices[p]:
+                continue
+            if strong[p] is not None:
+                picked[p] = strong[p]
+            elif strong[1 - p] is not None:
+                # No tick bar left (0 or 1 walls). The two cards are the outermost things
+                # in the sidebar: take the blob farthest from the other player's card.
+                picked[p] = max(choices[p], key=lambda o: abs(o[0][1] - strong[1 - p][0][1]))
+            elif choices[1 - p]:
+                # Neither card has a tick bar: the two blobs that are farthest apart.
+                pair = max(((a, b) for a in choices[p] for b in choices[1 - p]),
+                           key=lambda ab: abs(ab[0][0][1] - ab[1][0][1]))
+                picked[p] = pair[0]
+            else:
+                picked[p] = choices[p][0]
+        dots: list[Optional[Rect]] = [pk[0] if pk else None for pk in picked]
         for p in (RED, BLUE):
             dot = dots[p]
+            res.cards[p].dot = dot
             if dot is None:
                 res.warnings.append(f"{PLAYER_NAMES[p].lower()} player card not found")
                 continue
@@ -595,13 +737,11 @@ class ScreenParser:
                     hi = other[1]
                 else:
                     lo = other[3]
-            ticks = [rect for rect, _ in comps[p]
-                     if rect != dot and lo <= rect[1] and rect[3] <= hi and rect[1] >= dot[1] - (dot[3] - dot[1])]
-            ticks = _tick_group(ticks, bgr, hsv)
+            ticks = [t for t in picked[p][1] if lo <= t[1] and t[3] <= hi]
             res.cards[p].ticks = ticks
             res.cards[p].tick_count = len(ticks) if len(ticks) <= 10 else None
             if self.profile.ocr:
-                res.cards[p].ocr_count = self._ocr_count(bgr, dot, (x1, max(lo, y1), x2, min(hi, y2)), g)
+                res.cards[p].ocr_count = self._ocr_count(bgr, dot, ticks, (x1, max(lo, y1), x2, min(hi, y2)), g)
 
         # active card: a large hollow rectangle in the highlight colour around one of the icons
         active = hue_mask(hsv[y1:y2, x1:x2], self.profile.active_hues, self.profile)
@@ -620,33 +760,32 @@ class ScreenParser:
                 res.active_rect = rect
                 break
 
-    def _ocr_count(self, bgr, dot: Rect, area: Rect, g: Geometry) -> Optional[int]:
+    def _ocr_count(self, bgr, dot: Rect, ticks: list, area: Rect, g: Geometry) -> Optional[int]:
         """``X`` of the ``X/10`` text in the card around ``dot`` (needs pytesseract)."""
-        if self._tesseract is None:
-            try:
-                import pytesseract
-
-                pytesseract.get_tesseract_version()
-                self._tesseract = pytesseract
-            except Exception:
-                self._tesseract = False
-        if not self._tesseract:
+        if not self._have_tesseract():
             return None
         x1, y1, x2, y2 = area
-        y1 = max(y1, round(dot[1] - 0.5 * g.pitch))
-        y2 = min(y2, round(dot[3] + 2.5 * g.pitch))
+        if ticks:  # the readout is on the tick bar's line or right next to it
+            y1 = max(y1, round(min(dot[1], ticks[0][1]) - 0.3 * g.pitch))
+            y2 = min(y2, round(max(dot[3], max(t[3] for t in ticks)) + 0.4 * g.pitch))
+        else:
+            y1 = max(y1, round(dot[1] - 0.5 * g.pitch))
+            y2 = min(y2, round(dot[3] + 1.8 * g.pitch))
         crop = bgr[y1:y2, x1:x2]
         if crop.size == 0:
             return None
+        # OCR is slow and a ticking clock in the card changes the picture every
+        # second: read again only when the tick bar changed, or every few seconds.
         key = crop.tobytes()
+        slot = (dot[:2], len(ticks))  # the card (by its icon's position) and its tick count
+        last = self._count_cache.get(slot[0])
+        now = time.monotonic()
+        if last is not None and (last[0] == key or (last[1] == slot[1] and now - last[2] < 3.0)):
+            return last[3]
         if key not in self._ocr_cache:
             if len(self._ocr_cache) > 64:
                 self._ocr_cache.clear()
-            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-            scale = max(1.0, 90 / max(8.0, 0.3 * g.pitch) / 3)
-            gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-            if np.median(gray) < 128:
-                gray = 255 - gray  # tesseract prefers dark text on a light background
+            gray = _for_ocr(crop, min(4.0, max(1.5, 160 / g.pitch)))
             value = None
             try:
                 text = self._tesseract.image_to_string(gray, config="--psm 11")
@@ -656,6 +795,7 @@ class ScreenParser:
             except Exception:
                 value = None
             self._ocr_cache[key] = value
+        self._count_cache[slot[0]] = (key, slot[1], now, self._ocr_cache[key])
         return self._ocr_cache[key]
 
     # -- walls left --------------------------------------------------------
@@ -675,9 +815,13 @@ class ScreenParser:
                 return
         # One card unreadable (no ticks found counts as unreadable here, since it did
         # not fit as "0 left" above): the walls on the board tell the rest.
-        unreadable = [p for p in (RED, BLUE) if mixed[p] is None or (ocr[p] is None and ticks[p] == 0)]
+        # A lone "tick" is weak evidence too: it may be a digit of a red clock.
+        unreadable = [p for p in (RED, BLUE) if mixed[p] is None or (ocr[p] is None and ticks[p] <= 1)]
+        if len(unreadable) == 2 and placed == 20:
+            res.walls_left, res.walls_source, res.walls_consistent = (0, 0), "board", True
+            return
         known = [p for p in (RED, BLUE) if mixed[p] is not None]
-        if len(unreadable) == 1:
+        if len(unreadable) == 1 and mixed[1 - unreadable[0]] is not None:
             p = 1 - unreadable[0]
             other = 20 - placed - mixed[p]
             if 0 <= other <= 10:
@@ -700,6 +844,18 @@ class ScreenParser:
 # ---------------------------------------------------------------------- #
 # Small helpers
 # ---------------------------------------------------------------------- #
+def _for_ocr(crop: np.ndarray, scale: float) -> np.ndarray:
+    """Dark text on an even white background, whatever is behind the text.
+
+    Cards, page background and blanked-out areas side by side confuse the OCR's
+    layout analysis, so only the difference from the local background is kept.
+    """
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    diff = cv2.absdiff(gray, cv2.medianBlur(gray, 51))
+    return 255 - cv2.normalize(diff, None, 0, 255, cv2.NORM_MINMAX)
+
+
 def _runs(occupied: np.ndarray) -> Optional[list[int]]:
     """Start index of every wall in a line of groove segments (None if a run has odd length)."""
     starts, i, n = [], 0, len(occupied)
@@ -765,6 +921,87 @@ def _tick_group(rects: list[Rect], bgr: np.ndarray, hsv: np.ndarray) -> list[Rec
             cut = order[int(gaps.argmax())]
             best = [r for r, s in zip(best, strength) if s > cut]
     return sorted(best)
+
+
+MOVE_TOKEN = re.compile(r"^[a-i][1-9][hv]?$")
+Word = tuple[float, float, float, str]  # (x, y, height, text) of one OCR'd word
+
+
+def parse_move_rows(rows: Sequence[Sequence[Word]]) -> Optional[tuple[int, Optional[int], str]]:
+    """Whose turn it is according to a move list such as ``1. f1 e8`` / ``2. f2 e7`` / ``3. f3``.
+
+    ``rows`` are the OCR'd text lines, each a list of ``(x, y, height, word)``. Returns
+    ``(player to move, moves played or None, last row)``, or None when there is
+    no move list. Red moves first, so a last row with one move means Blue is to
+    move and a full row means Red is.
+
+    OCR of small text is imperfect (a row number read as "al", "f1" as "fl" or
+    "7"), so this relies on the layout rather than on every character: rows
+    with cleanly read moves give the x position of the two move columns and the
+    row spacing; the list is then followed downwards row by row, and the last
+    row has its second move if a word stands in the second column.
+    """
+    lines = []
+    for words in rows:
+        tokens = []
+        for x, _, _, word in words:
+            for part in re.split(r"[.,:;)|]+", word):
+                if part:
+                    part = part.lower()
+                    tokens.append((x, part[0] + part[1:].replace("l", "1").replace("i", "1").replace("s", "8")))
+        if tokens:
+            moves = [(x, t) for x, t in tokens if MOVE_TOKEN.match(t)]
+            y = float(np.median([w[1] for w in words]))
+            lines.append((y, tokens, moves, " ".join(w[3] for w in words), max(w[2] for w in words)))
+    lines.sort(key=lambda ln: ln[0])
+
+    def row_like(line) -> bool:  # a few short words, at least one with a digit in it
+        return len(line[1]) <= 5 and all(len(t) <= 4 for _, t in line[1]) \
+            and any(ch.isdigit() for _, t in line[1] for ch in t)
+
+    sure = [ln for ln in lines if ln[2] and row_like(ln)]
+    # complete rows: number, move, move (the number itself may be misread as a move, "a1")
+    pairs = [ln for ln in sure if len(ln[1]) >= 3 and all(MOVE_TOKEN.match(t) for _, t in ln[1][-2:])]
+    if not pairs:
+        # No complete row was read, so the columns are unknown. A lone "1. e8" could
+        # as well be "1. e8 e2" with a word lost: leave it to the other indicators.
+        return None
+    col1 = float(np.median([ln[1][-2][0] for ln in pairs]))
+    col2 = float(np.median([ln[1][-1][0] for ln in pairs]))
+    tol = 0.4 * (col2 - col1)
+
+    def in_column(line, col: float) -> bool:
+        return any(abs(x - col) <= tol for x, _ in line[1])
+
+    aligned = [ln for ln in lines if row_like(ln) and (in_column(ln, col1) or in_column(ln, col2))]
+    start = next(i for i, ln in enumerate(aligned) if ln in pairs)
+    # Row spacing from rows that certainly are moves; with a single such row,
+    # from the text height (rows are rarely more than 3.5 text heights apart).
+    known = [ln for ln in aligned if ln[2]]
+    steps = [b[0] - a[0] for a, b in zip(known, known[1:])]
+    pitch = float(min(steps)) if steps else 3.5 * aligned[start][4] / 1.7
+    chain = [aligned[start]]
+    for ln in aligned[start + 1:]:
+        if ln[0] - chain[-1][0] > 1.7 * pitch:
+            break  # a gap: something else below the list (chat, buttons)
+        chain.append(ln)
+    last = chain[-1]
+    count = 2 if in_column(last, col2) else 1
+    # A further row of which only the number was read: one or two moves? Unknown.
+    number_x = float(np.median([ln[1][-3][0] for ln in pairs]))
+    below = [ln for ln in lines if ln[0] > last[0] + 0.5 * pitch]
+    if below and below[0][0] - last[0] <= 1.7 * pitch and len(below[0][1]) == 1 \
+            and abs(below[0][1][0][0] - number_x) <= tol and below[0][1][0][1].isdigit():
+        return None
+    # The move count, if the row numbers of two rows agree with each other.
+    votes: dict[int, int] = {}
+    for back, ln in enumerate(reversed(chain)):
+        left = [t for x, t in ln[1] if x < col1 - 0.5 * tol]
+        if left and left[-1].isdigit():
+            votes[int(left[-1]) + back] = votes.get(int(left[-1]) + back, 0) + 1
+    number = max(votes, key=votes.get) if votes and max(votes.values()) >= 2 else None
+    plies = 2 * (number - 1) + count if number else None
+    return count % 2, plies, last[3]
 
 
 def _hint_turn(res: ParseResult) -> Optional[int]:
@@ -840,6 +1077,11 @@ def annotate(bgr: np.ndarray, res: ParseResult, turn: Optional[int] = None) -> n
 
     shown = turn if turn is not None else res.turn
     lines = [("OK" if res.ok else "NOT READABLE: " + res.reason)]
+    if res.ok:
+        side = "not visible (no tinted edge rows)" if res.flipped is None else (
+            "Red top, Blue bottom" if res.flipped else "Blue top, Red bottom")
+        moves = f"   move list: last row '{res.move_list_last}'" if res.move_list_turn is not None else ""
+        lines.append(f"home rows: {side}{moves}")
     if res.ok:
         lines.append(f"turn: {PLAYER_NAMES[shown] if shown is not None else '?'}   "
                      f"walls left: Blue {res.walls_left[BLUE]}  Red {res.walls_left[RED]} ({res.walls_source})   "

@@ -72,8 +72,10 @@ def main() -> None:
                         help="Screen Assistant: watch the screen for a Quoridor game and show the best move and "
                              "eval. Optional bot spec, e.g. --assistant ab:depth=8,time=3,walls=attack "
                              "(default ab:depth=30,time=1)")
-    parser.add_argument("--assistant-demo", action="store_true",
-                        help="Screen Assistant plus a self-playing mock game to try it on")
+    parser.add_argument("--assistant-demo", nargs="?", const="classic", choices=["classic", "timed"],
+                        help="Screen Assistant plus a self-playing mock game to try it on: 'classic' (green "
+                             "border on the active card) or 'timed' (online layout with clocks, move list and "
+                             "chat, Blue at the bottom)")
     parser.add_argument("--assistant-image", metavar="PNG",
                         help="Screen Assistant calibration: parse a saved screenshot, print what was detected "
                              "and write an annotated copy next to it")

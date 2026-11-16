@@ -78,6 +78,12 @@ def render(pawns: Sequence[tuple[int, int]] = ((8, 4), (0, 4)),
            size: tuple[int, int] = (1280, 800),
            origin: tuple[int, int] = (90, 110),
            names: Sequence[str] = ("You", "Opponent"),
+           layout: str = "classic",
+           flipped: bool = False,
+           tint: bool = True,
+           moves: Sequence[str] = (),
+           clocks: Sequence[str] = ("5:02", "4:32"),
+           low_time: Optional[int] = None,
            ) -> tuple[np.ndarray, Geometry]:
     """Render a screenshot; returns ``(bgr image, true board geometry)``.
 
@@ -98,10 +104,16 @@ def render(pawns: Sequence[tuple[int, int]] = ((8, 4), (0, 4)),
     _rounded(img, ox - pad, oy - pad, ox + board_px + pad, oy + board_px + pad, _bgr(theme.board), 10)
     geom = Geometry(ox + cell / 2, oy + cell / 2, pitch, pitch, cell)
 
+    player_rgb = (theme.red, theme.blue)
+    top_player = RED if flipped else BLUE
+    home = {0: top_player, N - 1: 1 - top_player}
     for r in range(N):
+        color = theme.cell
+        if tint and r in home:
+            color = tuple(round(0.84 * a + 0.16 * b) for a, b in zip(theme.cell, player_rgb[home[r]]))
         for c in range(N):
             x, y = ox + c * pitch, oy + r * pitch
-            _rounded(img, x, y, x + cell, y + cell, _bgr(theme.cell), max(2, cell // 9))
+            _rounded(img, x, y, x + cell, y + cell, _bgr(color), max(2, cell // 9))
     for r, c in hints:
         x, y = ox + c * pitch, oy + r * pitch
         _rounded(img, x + 1, y + 1, x + cell - 1, y + cell - 1, _bgr(theme.hint), max(2, cell // 9), 2)
@@ -115,7 +127,6 @@ def render(pawns: Sequence[tuple[int, int]] = ((8, 4), (0, 4)),
         cv2.putText(img, str(N - r), (ox + board_px + pad + 8, oy + r * pitch + cell // 2 + 6),
                     font, 0.6 * max(fs, 0.7), _bgr(theme.label), 1, cv2.LINE_AA)
 
-    player_rgb = (theme.red, theme.blue)
     for i, (r, c, o) in enumerate(walls):
         color = theme.wall if theme.wall is not None else player_rgb[wall_owners[i] if wall_owners else i % 2]
         t = max(4, gap - 4)
@@ -133,19 +144,25 @@ def render(pawns: Sequence[tuple[int, int]] = ((8, 4), (0, 4)),
         cv2.circle(img, (center[0] - cell // 9, center[1] - cell // 9), max(2, cell // 12),
                    _bgr(tuple(min(255, v + 70) for v in player_rgb[p])), -1, cv2.LINE_AA)
 
-    # player cards: Blue on top, Red at the bottom
+    # player cards: the player whose home row is the top row has the top card
+    timed = layout == "timed"
     card_x = ox + board_px + pad + int(0.9 * cell)
-    card_w, card_h = int(4.6 * cell), int(2.1 * cell)
-    for p, card_y in ((BLUE, oy), (RED, oy + board_px - card_h)):
+    card_w, card_h = int(4.6 * cell), int((1.9 if timed else 2.1) * cell)
+    small = 0.5 * max(fs, 0.8)
+    for p, card_y in ((top_player, oy), (1 - top_player, oy + board_px - card_h)):
         _rounded(img, card_x, card_y, card_x + card_w, card_y + card_h, _bgr(theme.card), 12)
-        if turn == p:
+        if turn == p and not timed:
             _rounded(img, card_x, card_y, card_x + card_w, card_y + card_h, _bgr(theme.green), 12, 3)
         dot = (card_x + int(0.5 * cell), card_y + int(0.55 * cell))
         cv2.circle(img, dot, int(0.17 * cell), _bgr(player_rgb[p]), -1, cv2.LINE_AA)
         cv2.putText(img, names[p], (dot[0] + int(0.4 * cell), dot[1] + 7), font, 0.65 * max(fs, 0.8),
                     _bgr(theme.text), 2, cv2.LINE_AA)
+        if timed:
+            clock_color = theme.red if low_time == p else theme.text
+            cv2.putText(img, clocks[p], (card_x + card_w - int(1.3 * cell), dot[1] + 8), font, 0.8 * max(fs, 0.8),
+                        _bgr(clock_color), 2, cv2.LINE_AA)
         tick_w, tick_h, step = max(4, cell // 8), int(0.5 * cell), max(8, int(0.3 * cell))
-        ty = card_y + int(1.15 * cell)
+        ty = card_y + int((1.05 if timed else 1.15) * cell)
         for i in range(10):
             tx = card_x + int(0.35 * cell) + i * step
             if i < walls_left[p]:
@@ -159,12 +176,46 @@ def render(pawns: Sequence[tuple[int, int]] = ((8, 4), (0, 4)),
             _rounded(img, tx, ty, tx + tick_w, ty + tick_h, _bgr(color), 2)
         cv2.putText(img, f"{walls_left[p]}/10", (card_x + int(0.5 * cell) + 10 * step, ty + tick_h - 4), font,
                     0.6 * max(fs, 0.8), _bgr(theme.text), 1, cv2.LINE_AA)
+
+    if timed:
+        # move list: "1. e2 e8" per row, the newest rows visible
+        my1 = oy + card_h + int(0.2 * cell)
+        my2 = my1 + int(2.9 * cell)
+        _rounded(img, card_x, my1, card_x + card_w, my2, _bgr(theme.card), 10)
+        cv2.putText(img, "Moves", (card_x + 14, my1 + int(0.42 * cell)), font, small, _bgr(theme.label), 1, cv2.LINE_AA)
+        rows = [(i // 2 + 1, moves[i:i + 2]) for i in range(0, len(moves), 2)]
+        line_h = int(0.42 * cell)
+        visible = rows[-max(1, (my2 - my1 - int(0.6 * cell)) // line_h):]
+        for k, (number, pair) in enumerate(visible):
+            y = my1 + int(0.9 * cell) + k * line_h
+            cv2.putText(img, f"{number}.", (card_x + 14, y), font, small, _bgr(theme.label), 1, cv2.LINE_AA)
+            for j, mv in enumerate(pair):
+                cv2.putText(img, mv, (card_x + int(0.9 * cell) + j * int(1.3 * cell), y), font, small,
+                            _bgr(theme.text), 1, cv2.LINE_AA)
+        # chat box with coloured name dots (these must not be taken for the card icons)
+        cy1 = my2 + int(0.2 * cell)
+        cy2 = oy + board_px - card_h - int(0.2 * cell)
+        if cy2 - cy1 > cell:
+            _rounded(img, card_x, cy1, card_x + card_w, cy2, _bgr(theme.card), 10)
+            cv2.putText(img, "Chat", (card_x + 14, cy1 + int(0.42 * cell)), font, small, _bgr(theme.label), 1,
+                        cv2.LINE_AA)
+            for k, (who, text) in enumerate(((RED, "good luck"), (BLUE, "thanks, 10/10 game"), (RED, "gg"))):
+                y = cy1 + int(0.85 * cell) + k * line_h
+                if y > cy2 - 8:
+                    break
+                cv2.circle(img, (card_x + 22, y - 5), max(4, int(0.13 * cell)), _bgr(player_rgb[who]), -1, cv2.LINE_AA)
+                cv2.putText(img, text, (card_x + 40, y), font, small, _bgr(theme.text), 1, cv2.LINE_AA)
     return img, geom
 
 
-def render_state(state, theme: Theme = DARK, show_hints: bool = True, **kwargs) -> tuple[np.ndarray, Geometry]:
-    """Render a :class:`~quoridor.state.BoardState` (hints only on Red's turn, like the real UI)."""
+def render_state(state, theme: Theme = DARK, show_hints: bool = True, hint_player: Optional[int] = RED,
+                 **kwargs) -> tuple[np.ndarray, Geometry]:
+    """Render a :class:`~quoridor.state.BoardState` (Red at the bottom).
+
+    Legal-move outlines are drawn only on ``hint_player``'s turn, like the real UI
+    shows them only to the local player.
+    """
     walls = [(r, c, getattr(o, "value", o)) for r, c, o in state.walls]
-    hints = state.valid_pawn_moves if (show_hints and state.current_player == RED) else ()
+    hints = state.valid_pawn_moves if (show_hints and state.current_player == hint_player) else ()
     return render(pawns=state.pawns, walls=walls, walls_left=state.walls_left, turn=state.current_player,
                   hints=hints, theme=theme, **kwargs)

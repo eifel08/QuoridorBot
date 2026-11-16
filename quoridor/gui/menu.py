@@ -25,7 +25,7 @@ MODE_LABELS = ("Human vs Human", "Human vs Bot", "Bot vs Bot")
 
 @dataclass
 class MatchSettings:
-    mode: str = "hvh"            # "hvh", "hvb" (Human vs Bot) or "bvb" (Bot vs Bot)
+    mode: str = "hvh"            # "hvh", "hvb" (Human vs Bot), "bvb" (Bot vs Bot) or "assistant" (Screen Assistant)
     depth: int = 4               # Human vs Bot: search depth, 1..30
     time_limit: Optional[float] = 5.0  # Human vs Bot: seconds per bot move, None = no limit
     human_side: int = 0          # Human vs Bot: 0 = Red (moves first), 1 = Blue
@@ -117,6 +117,8 @@ class Menu:
         dw = (col_w - 4 * 8) / 5
         self.delay_rects = [pygame.Rect(self.left + i * (dw + 8), 494, dw, 32) for i in range(5)]
         self.start_rect = pygame.Rect(self.cx - 120, h - 120, 240, 54)
+        # Screen Assistant: closes this window and opens the screen-reading overlay (quoridor.vision)
+        self.assistant_rect = pygame.Rect(w - 196, h - 52, 180, 36)
 
     # ------------------------------------------------------------------ #
     def run(self, settings: MatchSettings) -> Optional[MatchSettings]:
@@ -139,6 +141,8 @@ class Menu:
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     if self.start_rect.collidepoint(event.pos):
                         return s
+                    if self.assistant_rect.collidepoint(event.pos):
+                        return replace(s, mode="assistant")
                     s = self._click(s, event.pos)
                 if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                     for sl in (self.slider, *self.bot_sliders):
@@ -242,6 +246,7 @@ class Menu:
         pygame.draw.rect(scr, T.PANEL_ACTIVE_EDGE, self.start_rect, border_radius=12)
         g._text("Start", self.start_rect.center, g.font, (30, 30, 30))
         g._text("Enter = start   Esc = quit", (self.cx, self.start_rect.bottom + 22), g.font_small, T.TEXT_DIM)
+        self._button(self.assistant_rect, "Screen Assistant", False)
 
     def _draw_hvh(self, s: MatchSettings) -> None:
         g = self.gui

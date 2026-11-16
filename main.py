@@ -3,6 +3,7 @@
     python3 main.py          # graphical version (pygame)
     python3 main.py --cli    # terminal version
     python3 main.py --web    # browser version on http://localhost:8000
+    python3 main.py --assistant   # Screen Assistant: analyse a game shown on the screen
 """
 
 import argparse
@@ -67,6 +68,25 @@ def main() -> None:
     parser.add_argument("--headless", action="store_true",
                         help="Bot vs Bot: no board, play many games fast and print statistics; extra "
                              "options go to quoridor.botmatch (--games, --seed, --json, ...)")
+    parser.add_argument("--assistant", nargs="?", const="", metavar="BOT",
+                        help="Screen Assistant: watch the screen for a Quoridor game and show the best move and "
+                             "eval. Optional bot spec, e.g. --assistant ab:depth=8,time=3,walls=attack "
+                             "(default ab:depth=30,time=1)")
+    parser.add_argument("--assistant-demo", action="store_true",
+                        help="Screen Assistant plus a self-playing mock game to try it on")
+    parser.add_argument("--assistant-image", metavar="PNG",
+                        help="Screen Assistant calibration: parse a saved screenshot, print what was detected "
+                             "and write an annotated copy next to it")
+    parser.add_argument("--monitor", type=int, default=1,
+                        help="Screen Assistant: monitor to watch (1 = primary, 2 = second, 0 = all; default 1)")
+    parser.add_argument("--scan-fps", type=float, default=5.0,
+                        help="Screen Assistant: screen captures per second (default 5)")
+    parser.add_argument("--debug-preview", action="store_true",
+                        help="Screen Assistant: open the debug / calibration preview at start")
+    parser.add_argument("--no-overlay", action="store_true",
+                        help="Screen Assistant: don't mark the move on the board, only show the panel")
+    parser.add_argument("--vision-profile", metavar="JSON",
+                        help="Screen Assistant: colour thresholds for the screen parser (see README)")
     parser.add_argument("--p1", default="Player 1", help="name of Player 1 (GUI)")
     parser.add_argument("--p2", default="Player 2", help="name of Player 2 (GUI)")
     args, extra = parser.parse_known_args()
@@ -106,6 +126,27 @@ def main() -> None:
 
     if args.web:
         serve_web(args.port, open_browser=not args.no_browser)
+        return
+
+    if args.assistant is not None or args.assistant_demo or args.assistant_image:
+        from quoridor.vision import missing_hint
+
+        try:
+            if args.assistant_image:
+                from quoridor.vision import check_image
+
+                sys.exit(0 if check_image(args.assistant_image, profile_path=args.vision_profile) else 1)
+            from quoridor.vision import run_assistant
+
+            spec = parse_bot_spec(args.assistant) if args.assistant else BotSpec(depth=30, time_limit=1.0)
+            if wall_filter is not None and spec.kind == "ab" and "wall_filter" not in dict(spec.options):
+                spec = spec.with_wall_filter(wall_filter)
+            run_assistant(spec, args.monitor, args.scan_fps, args.vision_profile, args.debug_preview,
+                          not args.no_overlay, demo=args.assistant_demo)
+        except ImportError as exc:
+            sys.exit(f"Could not start the Screen Assistant ({exc}).\n{missing_hint(exc)}")
+        except (ValueError, FileNotFoundError) as exc:
+            parser.error(str(exc))
         return
 
     if args.cli:

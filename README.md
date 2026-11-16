@@ -3,7 +3,9 @@
 A 2-player [Quoridor](https://en.wikipedia.org/wiki/Quoridor) game emulator in Python, with
 three front-ends: a **browser version** (works from a plain link, also on phones), a pygame
 desktop GUI and a terminal CLI. Play **Human vs Human** on one device, or **Human vs Bot** against
-an alpha-beta search bot with an adjustable search depth (1-30).
+an alpha-beta search bot with an adjustable search depth (1-30). A **Screen Assistant** can also
+watch a game shown on the screen and overlay the bot's best move and evaluation
+(see [Screen Assistant](#screen-assistant-live-overlay)).
 
 ![GUI screenshot](docs/screenshot.png)
 
@@ -116,6 +118,137 @@ python main.py --mode human --eval-engine both
 `--eval-engine attack|both|all|py` turns the Human vs Human eval on with that engine;
 `--eval on|off` switches the eval bars of every mode. The terminal version (`--cli`) prints each
 bot's eval after its move (`eval +1.5`, `eval M3`).
+
+## Screen Assistant (live overlay)
+
+The Screen Assistant watches the screen for a Quoridor game, reads the position, lets one of
+our bots search it and shows the result live: a marker on the board for the recommended move
+and an always-on-top panel with the eval bar (`+1.5` / `M3` / `-M5`, Red from the bottom, Blue
+from the top), the best move and alternatives.
+
+![Screen Assistant watching the demo game](docs/assistant.png)
+
+Use it to analyse your own games, games against bots, or games you are watching. Most sites
+do not allow engine help in rated games against other people, so don't use it there.
+
+### Setup
+
+```bash
+pip install -r requirements-assistant.txt
+```
+
+```bash
+python build_engine.py
+```
+
+The first installs `mss` (screen capture), `opencv-python` and `numpy`. The second builds the
+C++ engine; without it the assistant uses the slower Python search. The windows use Tk, which
+comes with Python on Windows and macOS (Linux: `sudo apt install python3-tk`).
+Optional: `pip install pytesseract` plus the [Tesseract](https://github.com/tesseract-ocr/tesseract)
+program lets the assistant also read the `X/10` wall counters as text.
+
+| Command | What it does |
+|---|---|
+| `python main.py --assistant` | start the assistant with the default bot (`ab:depth=30,time=1`) |
+| `python main.py --assistant ab:depth=8,time=3,walls=attack` | choose the bot ([spec format](#bot-settings); `ml:model=best.pt` works too) |
+| `python main.py --assistant-demo` | assistant plus a self-playing mock game, to try it without a real game |
+| `python main.py --assistant --debug-preview` | open the calibration preview at start |
+| `python main.py --assistant --monitor 2` | watch the second monitor (`0` = all monitors) |
+| `python main.py --assistant-image shot.png` | parse a saved screenshot, print what was read, write `shot.parsed.png` |
+
+Other options: `--scan-fps 5` (captures per second), `--no-overlay` (panel only),
+`--vision-profile my.json` (colour thresholds, see below). The start menu of the desktop
+window (`python main.py`) also has a **Screen Assistant** button.
+
+Depth, think time, walls searched (attack / attack + defense / all) and engine (C++ / Python)
+can be changed in the panel while it runs; the current position is searched again at once.
+
+### What it expects on screen
+
+- **Board, left:** a 9x9 grid of square cells with gaps between them, files `a`-`i` under it
+  and ranks `1`-`9` on its right. The **blue** pawn starts at the top (`e9`), the **red** pawn
+  at the bottom (`e1`). Walls sit in the gaps and may have any colour. The white/grey outlines
+  on legal target squares are ignored when looking for pawns and walls.
+- **Player cards, right of the board:** Blue's card above Red's, each with a dot in the
+  player's colour, a bar of wall ticks and an `X/10` readout.
+- **Turn:** the card with the **green border** belongs to the player to move.
+
+The board and the cards are found automatically, at any position and size (squares of about
+35 px or more), in light and dark themes. Nothing has to be clicked or measured.
+
+### How the position is read
+
+| What | How |
+|---|---|
+| Board | a 9x9 lattice of equal squares is searched on the whole screen once; afterwards only that spot is re-checked each frame, and the search runs again if the board moves |
+| Pawns | the cell whose centre is red / blue and differs from the cell's own corners |
+| Walls | each groove segment is compared with the usual groove colour; occupied segments are paired into walls. A half-placed or hovering wall makes the frame "not readable" and is skipped |
+| Walls left | the tick bar of each card; the `X/10` text if pytesseract is installed; both are checked against the number of walls on the board (`20 - blue - red`). If one card can't be read, its count comes from the board |
+| Turn | 1. green card border, 2. legal-move outlines (they must be legal moves of exactly one player), 3. what changed since the previous position (a moved pawn or a spent wall tells who just moved). *Side to move* in the panel overrides all three |
+
+A position is passed to the engine only when it has been identical for two frames and differs
+from the last one searched, so identical frames and sliding pawns cost nothing. If the
+indicators contradict each other (wall counts don't add up, or the border still marks the
+player who just moved) it waits a few more frames first. A new position cancels the search
+that is still running.
+
+### Panel and overlay
+
+- **State:** turn (and where it was read from), walls left for Blue and Red, pawn squares.
+- **Evaluation:** the backed-up search score in the [same notation](#eval-display-desktop-window)
+  as the desktop game: the big number is written from the side it favours, in that side's
+  colour, with the side to move's own score next to it.
+- **Best move and alternatives** in board notation: `e2` is a pawn move to e2; `e3h` is a
+  horizontal wall above e3 and f3; `d4v` is a vertical wall to the right of d4 and d5 (a wall is
+  named after its lower-left square). Each line also shows the reply the engine expects.
+  Alternatives are searched with a smaller budget than the best move, so their scores are
+  approximate.
+- **Marker:** the target square (with an arrow from the pawn, on Windows) or the exact wall slot
+  is outlined in magenta on the board. *Show move for* limits this to Red's or Blue's turns.
+- **Windows:** the marker is a transparent click-through window, and all assistant windows are
+  hidden from screen capture, so they can sit anywhere.
+  **macOS / Linux:** Tk cannot make a window click-through there, so the marker is an outline
+  made of four thin strips (the square under it stays clickable), and the panel and preview
+  are blanked out of each captured frame. They are moved off the game once when it is found;
+  keep them off it. macOS needs the *Screen Recording* permission for the terminal or Python.
+  Linux needs X11 (not Wayland).
+
+### Calibration and troubleshooting
+
+Tick **Debug / calibration preview** in the panel (or start with `--debug-preview`). The
+preview shows the captured game with everything the parser detected drawn on it: cell grid
+(yellow), pawns with their squares, walls with their names (magenta), legal-move outlines
+(crosses), the card dots and counted ticks, the active card, plus a text line with turn,
+walls left and warnings. `--assistant-image shot.png` produces the same picture from a file.
+
+| Problem | What to do |
+|---|---|
+| "Looking for a Quoridor board" | the whole board must be visible on the watched monitor (`--monitor`); press *Re-scan screen* after changing the layout |
+| a pawn or the turn is not found | the site's colours are outside the defaults: put the changed values in a JSON file and pass `--vision-profile` |
+| walls are missed or invented | lower or raise `wall_delta` in the profile |
+| wall counts are wrong | the preview shows which ticks were counted; install pytesseract for the text readout, or rely on the board check |
+| turn is wrong or unknown | set *Side to move* in the panel |
+
+Profile keys and defaults (hues are OpenCV's 0-179 scale):
+
+```json
+{
+  "red_hues": [[0, 12], [165, 179]],
+  "blue_hues": [[95, 135]],
+  "active_hues": [[38, 90]],
+  "min_saturation": 90,
+  "min_value": 90,
+  "pawn_fill": 0.3,
+  "wall_delta": 45.0,
+  "hint_delta": 14.0,
+  "sidebar_width": 1.3,
+  "ocr": true
+}
+```
+
+The parser has been tested on mock screenshots of this layout (`quoridor/vision/synthetic.py`,
+`tests/test_vision.py`), not yet on the real site, so expect to check the preview once and
+possibly adjust the profile.
 
 ## Bot vs Bot
 
@@ -471,6 +604,7 @@ python build_engine.py
 | `python3 main.py --mode bots --bot1 ab:depth=2 --bot2 ab:depth=4` | watch Bot vs Bot |
 | `python3 -m quoridor.botmatch --games 100` | fast headless Bot vs Bot batch with statistics |
 | `python3 main.py --web` | browser version on localhost |
+| `python3 main.py --assistant` | Screen Assistant: analyse a game shown on the screen (needs `requirements-assistant.txt`) |
 
 Run the tests (GUI tests run headless and are skipped without pygame; the web engine test
 needs Node.js and is skipped without it):
@@ -537,8 +671,9 @@ Invalid input or illegal moves are rejected with an explanation and you are aske
 ## Code layout
 
 ```
-main.py                Launcher: desktop GUI, --cli, --web
+main.py                Launcher: desktop GUI, --cli, --web, --assistant
 requirements.txt       pygame-ce (desktop GUI only)
+requirements-assistant.txt  mss, opencv-python, numpy (Screen Assistant only)
 web/                   Browser version (static site, deployed to GitHub Pages)
   index.html, style.css, app.js   UI: SVG board, drag-and-drop, animations
   engine.js            JS port of the rules (checked against Python by tests)
@@ -575,6 +710,13 @@ requirements-ml.txt  torch, numpy, tensorboard (training only)
     anim.py, theme.py  Tweens and colors
     menu.py            Start menu: mode, depth sliders, think times, side, move delay
     player.py          GuiHumanPlayer, GuiBotPlayer (runs a bot in a background thread)
+  vision/              Screen Assistant
+    parser.py          screenshot -> board, pawns, walls, walls left, turn
+    position.py        stable positions from frames, turn from history, move notation
+    analysis.py        best move, eval and alternatives from any bot (background thread)
+    capture.py         screen-capture loop (mss)
+    app.py             panel, on-board marker and debug preview (Tk)
+    synthetic.py, demo.py  mock screenshots of the target UI (tests, --assistant-demo)
 tests/                 unittest suite
 ```
 

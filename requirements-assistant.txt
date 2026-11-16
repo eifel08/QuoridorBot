@@ -1,0 +1,7 @@
+# Screen Assistant (python main.py --assistant): screen capture and image parsing.
+# The windows use Tk, which ships with Python (Linux: sudo apt install python3-tk).
+mss>=9.0
+opencv-python>=4.8
+numpy>=1.24
+# Optional: also read the "X/10" wall counters as text (needs the Tesseract program installed).
+# pytesseract>=0.3.10

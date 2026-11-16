@@ -55,11 +55,15 @@ def run_gui(name1: str = "Player 1", name2: str = "Player 2",
     """
     gui = QuoridorGUI()
     settings = settings or MatchSettings()
+    assistant = False
     try:
         while True:
             if show_menu:
                 chosen = Menu(gui).run(settings)
                 if chosen is None:
+                    break
+                if chosen.mode == "assistant":  # leaves pygame; the assistant has its own windows
+                    assistant = True
                     break
                 settings = chosen
             show_menu = True
@@ -72,3 +76,14 @@ def run_gui(name1: str = "Player 1", name2: str = "Player 2",
     finally:
         gui.set_eval_display((False, False))  # stops the background evaluator
         pygame.quit()
+    if assistant:
+        from ..bots import BotSpec
+
+        try:
+            from ..vision import run_assistant
+
+            run_assistant(BotSpec(depth=30, time_limit=1.0).with_wall_filter(settings.wall_filter))
+        except ImportError as exc:
+            from ..vision import missing_hint
+
+            raise SystemExit(f"Could not start the Screen Assistant ({exc}).\n{missing_hint(exc)}") from None

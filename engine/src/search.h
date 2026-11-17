@@ -120,6 +120,13 @@ private:
         PathInfo info;
         uint8_t pad[4];
     };
+    struct DefEntry {  // global-defense masks of a position (interior nodes recur every iteration)
+        uint64_t key;
+        uint64_t def[2], fun[2];
+        uint8_t funnel;  // the funnel masks were computed too
+        uint8_t pad[7];
+    };
+    mutable std::vector<DefEntry> dcache_;
     mutable std::vector<EvalEntry> ecache_;  // allocated once; no allocation during the search
     uint64_t ecache_mask_ = 0;
 

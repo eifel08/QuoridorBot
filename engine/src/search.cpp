@@ -50,6 +50,7 @@ Search::Search(int hash_mb) {
     resize_tt(hash_mb);
     ecache_.assign(1 << 15, EvalEntry{});  // 768 KB: stays in the CPU cache
     ecache_mask_ = ecache_.size() - 1;
+    dcache_.assign(1 << 14, DefEntry{});  // 640 KB
     new_game();
 }
 
@@ -64,6 +65,7 @@ void Search::resize_tt(int hash_mb) {
 void Search::new_game() {
     std::fill(tt_.begin(), tt_.end(), TTEntry{});
     std::fill(ecache_.begin(), ecache_.end(), EvalEntry{});
+    std::fill(dcache_.begin(), dcache_.end(), DefEntry{});
     std::memset(history_, 0, sizeof(history_));
     std::memset(killer_, MOVE_NONE, sizeof(killer_));
     age_ = 0;
@@ -428,9 +430,21 @@ int Search::gen_walls(int me, int d_me, int d_opp, const GoalLayers& gl_me, int 
     uint64_t def_v = ((tv << NW) | (tv >> NW) | th) & free_v;
     // Global defense (path-existence) and funnelling walls; see global_defense().
     uint64_t gdef[2] = {0, 0}, fun[2] = {0, 0};
-    if (filter == FILTER_ATTACK_DEFENSE && cfg.def_global && board.walls_left[opp] > 0 && depth >= cfg.def_min_depth)
-        global_defense(me, d_me, cut_me, cut_opp, free_h, free_v, cfg.def_funnel && depth > cfg.def_min_depth,
-                       gdef, fun);
+    if (filter == FILTER_ATTACK_DEFENSE && cfg.def_global && board.walls_left[opp] > 0 && depth >= cfg.def_min_depth) {
+        const bool funnel = cfg.def_funnel && depth > cfg.def_min_depth;
+        DefEntry& e = dcache_[board.hash & (dcache_.size() - 1)];
+        if (e.key == board.hash && (e.funnel || !funnel)) {
+            gdef[0] = e.def[0];
+            gdef[1] = e.def[1];
+            if (funnel) {
+                fun[0] = e.fun[0];
+                fun[1] = e.fun[1];
+            }
+        } else {
+            global_defense(me, d_me, cut_me, cut_opp, free_h, free_v, funnel, gdef, fun);
+            e = DefEntry{board.hash, {gdef[0], gdef[1]}, {fun[0], fun[1]}, uint8_t(funnel), {}};
+        }
+    }
     def_h |= gdef[0];
     def_v |= gdef[1];
     fun[0] &= ~(def_h | att_h);

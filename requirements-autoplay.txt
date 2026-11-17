@@ -1,0 +1,5 @@
+# Auto-Play (python main.py --autoplay): the Screen Assistant plus mouse control.
+-r requirements-assistant.txt
+pyautogui>=0.9.54
+# Esc as a system-wide emergency stop on macOS and Linux (Windows needs nothing extra).
+pynput>=1.7

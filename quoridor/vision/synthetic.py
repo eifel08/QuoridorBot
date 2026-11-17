@@ -84,6 +84,7 @@ def render(pawns: Sequence[tuple[int, int]] = ((8, 4), (0, 4)),
            moves: Sequence[str] = (),
            clocks: Sequence[str] = ("5:02", "4:32"),
            low_time: Optional[int] = None,
+           active_clock: Optional[int] = None,
            ) -> tuple[np.ndarray, Geometry]:
     """Render a screenshot; returns ``(bgr image, true board geometry)``.
 
@@ -158,6 +159,11 @@ def render(pawns: Sequence[tuple[int, int]] = ((8, 4), (0, 4)),
         cv2.putText(img, names[p], (dot[0] + int(0.4 * cell), dot[1] + 7), font, 0.65 * max(fs, 0.8),
                     _bgr(theme.text), 2, cv2.LINE_AA)
         if timed:
+            if active_clock == p:  # the running clock sits in a brighter box
+                bx = card_x + card_w - int(1.45 * cell)
+                box = tuple(min(255, v + 45) for v in theme.card) if sum(theme.card) < 380 else \
+                    tuple(max(0, v - 45) for v in theme.card)
+                _rounded(img, bx, dot[1] - int(0.3 * cell), card_x + card_w - 8, dot[1] + int(0.3 * cell), _bgr(box), 6)
             clock_color = theme.red if low_time == p else theme.text
             cv2.putText(img, clocks[p], (card_x + card_w - int(1.3 * cell), dot[1] + 8), font, 0.8 * max(fs, 0.8),
                         _bgr(clock_color), 2, cv2.LINE_AA)

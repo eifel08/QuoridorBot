@@ -238,6 +238,7 @@ class AssistantApp:
     def _build(self, debug: bool, overlay: bool) -> None:
         root = self.root
         pad = dict(padx=12, pady=(8, 0))
+        self._build_header()
         self.status = self._label(root, "Looking for a Quoridor board...", WARN, 10, True, wraplength=300)
         self.status.pack(fill="x", **pad)
 
@@ -326,6 +327,9 @@ class AssistantApp:
                                                              padx=10, pady=8)
         if debug:
             self._toggle_preview()
+
+    def _build_header(self) -> None:
+        """Extra widgets above the status line (used by Auto-Play)."""
 
     # -- settings -----------------------------------------------------------------
     def _apply_spec(self, _event=None) -> None:

@@ -4,6 +4,7 @@
     python3 main.py --cli    # terminal version
     python3 main.py --web    # browser version on http://localhost:8000
     python3 main.py --assistant   # Screen Assistant: analyse a game shown on the screen
+    python3 main.py --autoplay    # Auto-Play: the bot also plays the bottom player's moves with the mouse
 """
 
 import argparse
@@ -79,6 +80,19 @@ def main() -> None:
     parser.add_argument("--assistant-image", metavar="PNG",
                         help="Screen Assistant calibration: parse a saved screenshot, print what was detected "
                              "and write an annotated copy next to it")
+    parser.add_argument("--autoplay", nargs="?", const="", metavar="BOT",
+                        help="Auto-Play: like --assistant, but the bot also plays the bottom player's moves with "
+                             "the mouse. Starts switched off; Esc or the mouse in a screen corner stops it. "
+                             "Optional bot spec (default ab:depth=30,time=1)")
+    parser.add_argument("--autoplay-demo", nargs="?", const="red", choices=["red", "blue"],
+                        help="Auto-Play plus a clickable mock game to try it on, with the bot as Red (moves first) "
+                             "or Blue")
+    parser.add_argument("--click-profile", metavar="JSON",
+                        help="Auto-Play: how moves are entered on the site (wall click point, pauses; see README)")
+    parser.add_argument("--armed", action="store_true",
+                        help="Auto-Play: switched on from the start instead of waiting for the Start button")
+    parser.add_argument("--join", action="store_true",
+                        help="Auto-Play: also take over a game that is already in progress")
     parser.add_argument("--monitor", type=int, default=1,
                         help="Screen Assistant: monitor to watch (1 = primary, 2 = second, 0 = all; default 1)")
     parser.add_argument("--scan-fps", type=float, default=5.0,
@@ -128,6 +142,23 @@ def main() -> None:
 
     if args.web:
         serve_web(args.port, open_browser=not args.no_browser)
+        return
+
+    if args.autoplay is not None or args.autoplay_demo:
+        from quoridor.vision import missing_hint
+
+        try:
+            from quoridor.vision import run_autoplay
+
+            spec = parse_bot_spec(args.autoplay) if args.autoplay else BotSpec(depth=30, time_limit=1.0)
+            if wall_filter is not None and spec.kind == "ab" and "wall_filter" not in dict(spec.options):
+                spec = spec.with_wall_filter(wall_filter)
+            run_autoplay(spec, args.monitor, args.scan_fps, args.vision_profile, args.debug_preview,
+                         args.click_profile, args.join, demo=args.autoplay_demo, armed=args.armed)
+        except ImportError as exc:
+            sys.exit(f"Could not start Auto-Play ({exc}).\n{missing_hint(exc)}")
+        except (ValueError, FileNotFoundError) as exc:
+            parser.error(str(exc))
         return
 
     if args.assistant is not None or args.assistant_demo or args.assistant_image:

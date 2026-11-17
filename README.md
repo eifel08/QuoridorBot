@@ -5,7 +5,8 @@ three front-ends: a **browser version** (works from a plain link, also on phones
 desktop GUI and a terminal CLI. Play **Human vs Human** on one device, or **Human vs Bot** against
 an alpha-beta search bot with an adjustable search depth (1-30). A **Screen Assistant** can also
 watch a game shown on the screen and overlay the bot's best move and evaluation
-(see [Screen Assistant](#screen-assistant-live-overlay)).
+(see [Screen Assistant](#screen-assistant-live-overlay)), and **Auto-Play Mode** lets the bot
+play such a game itself with the mouse (see [Auto-Play Mode](#auto-play-mode)).
 
 ![GUI screenshot](docs/screenshot.png)
 
@@ -288,6 +289,141 @@ Profile keys and defaults (hues are OpenCV's 0-179 scale):
 The parser has been tested on mock screenshots of both variants and both orientations
 (`quoridor/vision/synthetic.py`, `tests/test_vision.py`), not yet on the real site, so expect to
 check the preview once and possibly adjust the profile.
+
+## Auto-Play Mode
+
+Auto-Play is a separate mode built on the Screen Assistant. It reads the game the same way,
+and in addition **plays the bottom player's moves with the mouse**: it works out which colour
+is at the bottom, follows the game from the first move, and whenever it is its turn it clicks
+the engine's move on the board. The panel keeps showing the eval bar and the planned move.
+
+![Auto-Play playing the clickable demo game](docs/autoplay.png)
+
+It takes over the mouse while it moves, and it plays for you. Use it where a bot is allowed:
+your own games against bots, test games with friends who know, or a bot account. Most sites
+forbid engine play against other people.
+
+### Setup and launch
+
+```bash
+pip install -r requirements-autoplay.txt
+```
+
+This adds `pyautogui` (mouse control) and `pynput` (Esc as a system-wide stop key on macOS and
+Linux) to the Screen Assistant's requirements. macOS also asks for the *Accessibility*
+permission for the terminal or Python.
+
+| Command | What it does |
+|---|---|
+| `python main.py --autoplay` | open Auto-Play with the default bot (`ab:depth=30,time=1`) |
+| `python main.py --autoplay ab:depth=12,time=2,walls=attack` | choose the bot ([spec format](#bot-settings)) |
+| `python main.py --autoplay-demo` | Auto-Play plus a clickable mock game, the bot as Red (moves first) |
+| `python main.py --autoplay-demo blue` | the same with the bot as Blue (the opponent moves first) |
+| `python main.py --autoplay --click-profile my.json` | how moves are entered on your site (see below) |
+| `python main.py --autoplay --join` | also take over a game that is already running |
+
+The desktop start menu (`python main.py`) has its own **Auto-Play Mode** button above
+*Screen Assistant*. `--monitor`, `--scan-fps`, `--debug-preview` and `--vision-profile` work as
+for the assistant. Depth, think time, walls and engine can be changed in the panel.
+
+**It starts switched off.** Open the game so that the start position is visible, then press
+**Start auto-play** in the panel (`--armed` presses it at launch). The button turns into a red
+**STOP**.
+
+### Emergency stop
+
+Any of these halts the bot at once, also in the middle of a mouse movement, and switches
+Auto-Play off until you press *Start* again:
+
+- **Esc**, in any window (Windows: built in; macOS / Linux: needs `pynput`, otherwise Esc only
+  works while the panel is the active window, and the panel says so);
+- moving the **mouse into a corner of the screen** (pyautogui's fail-safe);
+- the red **STOP** button, or closing the panel.
+
+The bot also stops by itself, and tells you why, when a click did not change the board after
+a retry, when the board shows something it did not expect, or when it lost count of the moves.
+
+### Which colour it plays
+
+Auto-Play plays **only the bottom player**. At the start position it reads three signs and
+they must not contradict each other: the pawn standing on the bottom row, the tint of the
+bottom row, and the colour of the lower player card. The colour is then locked for that game
+and shown in the panel ("Playing as: Blue (bottom)", with the signs it was read from). A new
+start position starts a new game and locks the colour again.
+
+### How it knows it is its turn
+
+All of these are combined, and the bot clicks only when the first one says it is its turn and
+none of the others says it is the opponent's:
+
+| Signal | How it is used |
+|---|---|
+| **Move count** | counted from move 0: every change of the board must be exactly one legal move of the player whose turn it is (Red moves first: even count = Red, odd = Blue). Two moves seen at once are accepted if they split into one legal move each. Anything else stops the bot |
+| **Clocks** | only the running clock changes, so the pixels of the two player cards are compared over a few seconds: if the opponent's card keeps changing and the bot's does not, it waits. If one card is brighter whenever its player is to move (a highlighted clock box), that is learned during the game and used as well |
+| **Legal-move outlines** | outlines of the opponent's moves block the click. Once the site has shown outlines on the bot's turn, the bot waits for them (up to 5 s) before moving |
+| **Green border** | a border on the opponent's card blocks the click |
+| **Move list** | a list that shows the opponent to move makes the bot wait up to 6 s for it to catch up; it is then overruled, because OCR can misread a row |
+| **State-change lock** | after a move the bot does nothing until two frames in a row show the board with that move on it (or that move plus the opponent's legal reply). If nothing changed after 4 s it tries once more, then stops |
+
+The panel shows the state (`WAITING FOR OPPONENT`, `THINKING`, `MOVING`), the move count and
+what each signal currently says.
+
+### How moves are clicked
+
+- **Pawn move or jump:** the cursor glides to the centre of the target square, rests there
+  briefly so the site registers the hover, and clicks.
+- **Wall:** the cursor goes into the gap between the squares the wall lies along, and clicks.
+  A wall touches two squares on each side; the **wall click point** says where in the gap:
+
+  | `wall_click` | Horizontal wall `e3h` (above e3 and f3) | Vertical wall `d4v` (right of d4 and d5) |
+  |---|---|---|
+  | `first` (default) | in the gap above **e3** | in the gap right of **d5** (the upper square) |
+  | `second` | in the gap above **f3** | in the gap right of **d4** (the lower square) |
+  | `center` | at the crossing point between e3 and f3 | at the crossing point between d4 and d5 |
+
+  Sites differ in which wall they offer for a hovered gap. Before clicking, the bot looks at
+  the site's own preview: if the previewed wall is not the intended one it does not click,
+  tries the other points, and keeps the one that previews the right wall (the *Wall click
+  point* box in the panel changes accordingly). **Test wall hover (no click)** moves the cursor
+  to the click point of a sample wall so you can check the preview yourself.
+- After every move the cursor returns to where it was, or below the board if it was on it,
+  so it never rests on the board and hides nothing from the parser.
+
+Everything about clicking is in one small JSON file (`--click-profile`); the defaults:
+
+```json
+{
+  "pawn_click": "target",
+  "wall_click": "first",
+  "wall_gesture": "click",
+  "wall_key_h": "",
+  "wall_key_v": "",
+  "move_seconds": [0.1, 0.3],
+  "hover_pause": 0.2,
+  "press_seconds": 0.05,
+  "check_preview": true,
+  "confirm_timeout": 4.0,
+  "retries": 1,
+  "think_delay": 0.0
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `pawn_click` | `target` = click the target square; `pawn-then-target` = click the pawn first; `drag` = drag the pawn |
+| `wall_click` | where in the gap a wall is clicked (table above) |
+| `wall_gesture` | `click`, or `drag` = drag a wall from the bot's wall reserve (its tick bar) to that point |
+| `wall_key_h` / `wall_key_v` | a key to press before a horizontal / vertical wall, for sites with a wall mode or an orientation toggle |
+| `move_seconds` | shortest and longest cursor travel time; `hover_pause`: rest before the click |
+| `confirm_timeout`, `retries` | how long to wait for the board to show the move, and how often to try again |
+
+The clicking code is `quoridor/vision/autoplay.py`: `pawn_point` and `wall_points` turn a move
+into a point, `AutoPlayer.perform` / `_place_wall` do the gestures.
+
+Auto-Play has been tested with real mouse events against the clickable mock game
+(`--autoplay-demo`, both colours, and with a different wall rule to exercise the preview
+check), not on a real site. Try the demo first, then check *Test wall hover* on your site
+before the first real game.
 
 ## Bot vs Bot
 
@@ -644,6 +780,7 @@ python build_engine.py
 | `python3 -m quoridor.botmatch --games 100` | fast headless Bot vs Bot batch with statistics |
 | `python3 main.py --web` | browser version on localhost |
 | `python3 main.py --assistant` | Screen Assistant: analyse a game shown on the screen (needs `requirements-assistant.txt`) |
+| `python3 main.py --autoplay` | Auto-Play: the bot plays the bottom player with the mouse (needs `requirements-autoplay.txt`) |
 
 Run the tests (GUI tests run headless and are skipped without pygame; the web engine test
 needs Node.js and is skipped without it):
@@ -710,9 +847,10 @@ Invalid input or illegal moves are rejected with an explanation and you are aske
 ## Code layout
 
 ```
-main.py                Launcher: desktop GUI, --cli, --web, --assistant
+main.py                Launcher: desktop GUI, --cli, --web, --assistant, --autoplay
 requirements.txt       pygame-ce (desktop GUI only)
 requirements-assistant.txt  mss, opencv-python, numpy (Screen Assistant only)
+requirements-autoplay.txt   pyautogui, pynput (Auto-Play only)
 web/                   Browser version (static site, deployed to GitHub Pages)
   index.html, style.css, app.js   UI: SVG board, drag-and-drop, animations
   engine.js            JS port of the rules (checked against Python by tests)
@@ -755,7 +893,9 @@ requirements-ml.txt  torch, numpy, tensorboard (training only)
     analysis.py        best move, eval and alternatives from any bot (background thread)
     capture.py         screen-capture loop (mss)
     app.py             panel, on-board marker and debug preview (Tk)
-    synthetic.py, demo.py  mock screenshots of the target UI (tests, --assistant-demo)
+    autoplay.py        Auto-Play: click points, mouse, clocks, turn logic and state machine
+    autoplay_app.py    Auto-Play panel (Start / STOP, identity, signals)
+    synthetic.py, demo.py  mock screenshots and mock games of the target UI (tests, demos)
 tests/                 unittest suite
 ```
 

@@ -25,7 +25,7 @@ MODE_LABELS = ("Human vs Human", "Human vs Bot", "Bot vs Bot")
 
 @dataclass
 class MatchSettings:
-    mode: str = "hvh"            # "hvh", "hvb" (Human vs Bot), "bvb" (Bot vs Bot) or "assistant" (Screen Assistant)
+    mode: str = "hvh"            # "hvh", "hvb" (Human vs Bot), "bvb" (Bot vs Bot), "assistant" (Screen Assistant) or "autoplay"
     depth: int = 4               # Human vs Bot: search depth, 1..30
     time_limit: Optional[float] = 5.0  # Human vs Bot: seconds per bot move, None = no limit
     human_side: int = 0          # Human vs Bot: 0 = Red (moves first), 1 = Blue
@@ -119,6 +119,8 @@ class Menu:
         self.start_rect = pygame.Rect(self.cx - 120, h - 120, 240, 54)
         # Screen Assistant: closes this window and opens the screen-reading overlay (quoridor.vision)
         self.assistant_rect = pygame.Rect(w - 196, h - 52, 180, 36)
+        # Auto-Play: the same, and the bot also enters the bottom player's moves with the mouse
+        self.autoplay_rect = pygame.Rect(w - 196, h - 96, 180, 36)
 
     # ------------------------------------------------------------------ #
     def run(self, settings: MatchSettings) -> Optional[MatchSettings]:
@@ -143,6 +145,8 @@ class Menu:
                         return s
                     if self.assistant_rect.collidepoint(event.pos):
                         return replace(s, mode="assistant")
+                    if self.autoplay_rect.collidepoint(event.pos):
+                        return replace(s, mode="autoplay")
                     s = self._click(s, event.pos)
                 if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                     for sl in (self.slider, *self.bot_sliders):
@@ -247,6 +251,7 @@ class Menu:
         g._text("Start", self.start_rect.center, g.font, (30, 30, 30))
         g._text("Enter = start   Esc = quit", (self.cx, self.start_rect.bottom + 22), g.font_small, T.TEXT_DIM)
         self._button(self.assistant_rect, "Screen Assistant", False)
+        self._button(self.autoplay_rect, "Auto-Play Mode", False)
 
     def _draw_hvh(self, s: MatchSettings) -> None:
         g = self.gui

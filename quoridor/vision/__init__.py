@@ -5,6 +5,7 @@
 ``analysis``  best move, eval and alternatives from any configured bot
 ``capture``   background screen-capture loop (mss)
 ``app``       always-on-top panel, on-board move marker, debug preview (Tk)
+``autoplay``  Auto-Play: the bot enters the bottom player's moves with the mouse
 
 Needs ``mss``, ``opencv-python`` and ``numpy`` (``requirements-assistant.txt``).
 """
@@ -15,6 +16,8 @@ from typing import Optional
 
 def missing_hint(exc: ImportError) -> str:
     """What to install when an import of the assistant failed."""
+    if "pyautogui" in str(exc):
+        return "Auto-Play needs the mouse library: pip install -r requirements-autoplay.txt"
     if "tkinter" in str(exc):
         return ("Tk is missing from this Python. Windows/macOS: reinstall Python from python.org with "
                 "'tcl/tk' ticked; Linux: sudo apt install python3-tk")
@@ -38,6 +41,32 @@ def run_assistant(spec=None, monitor: int = 1, fps: float = 5.0, profile_path: O
         from .demo import DemoGame
 
         app.demo = DemoGame(app.root, layout=demo)
+    app.run()
+
+
+def run_autoplay(spec=None, monitor: int = 1, fps: float = 5.0, profile_path: Optional[str] = None,
+                 debug: bool = False, click_profile_path: Optional[str] = None, join_in_progress: bool = False,
+                 demo: Optional[str] = None, armed: bool = False) -> None:
+    """Open Auto-Play (the bot plays the bottom player with the mouse) and run until its panel is closed.
+
+    It starts switched off; nothing is clicked before *Start auto-play* is pressed
+    (``armed=True`` presses it at launch).
+    ``demo``: "red" or "blue" also opens a clickable mock game with the bot on that colour.
+    """
+    from .analysis import DEFAULT_SPEC
+    from .autoplay import ClickProfile
+    from .autoplay_app import AutoPlayApp
+    from .parser import Profile
+
+    profile = Profile.load(profile_path) if profile_path else None
+    clicks = ClickProfile.load(click_profile_path) if click_profile_path else None
+    app = AutoPlayApp(spec or DEFAULT_SPEC, monitor, fps, profile, debug, clicks, join_in_progress)
+    if demo:
+        from .demo import PlayableDemo
+
+        app.demo = PlayableDemo(app.root, flipped=demo == "blue")
+    if armed:
+        app.player.arm()
     app.run()
 
 

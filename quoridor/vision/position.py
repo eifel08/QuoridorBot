@@ -182,6 +182,7 @@ class PositionTracker:
         self.turn_source = ""                  # "manual", "border", "move list", "outlines", "history", "parity"
         self.orientation_source = ""           # "tint", "pawns" (guessed from where the pawns stand)
         self.forced_turn: Optional[int] = None  # set by the user to override the detection
+        self.counted_turn: Optional[int] = None  # set by Auto-Play from its exact move count (Red moves first)
         self.forced_flipped: Optional[bool] = None
         self.problem = ""                      # why the last stable frame was rejected
         self._candidate: Optional[tuple] = None
@@ -214,7 +215,8 @@ class PositionTracker:
             self._candidate, self._count = None, 0
             return None
         flipped = self._orientation(res)
-        frame_turn = self.forced_turn if self.forced_turn is not None else res.turn
+        given = self.forced_turn if self.forced_turn is not None else self.counted_turn
+        frame_turn = given if given is not None else res.turn
         key = (res.pawns, res.walls, res.walls_left, frame_turn, flipped)
         if key == self._candidate:
             self._count += 1
@@ -223,7 +225,8 @@ class PositionTracker:
 
         pos = Position(res.pawns, res.walls, res.walls_left, frame_turn, flipped)
         mover = mover_between(self.current, pos) if self.current is not None else None
-        source = "manual" if self.forced_turn is not None else res.turn_source
+        source = "manual" if self.forced_turn is not None else (
+            "move count" if self.counted_turn is not None else res.turn_source)
         if pos.turn is None:
             if self.current is not None and self.current.board_key == pos.board_key:
                 pos = replace(pos, turn=self.current.turn)
@@ -238,7 +241,7 @@ class PositionTracker:
             pos, source = replace(pos, turn=1 - pos.turn), "history"  # same misreading as before
         # An indicator that still names the player who just moved (a border or a
         # move list that has not caught up yet) is probably about to change.
-        contradicted = mover is not None and pos.turn == mover and source != "manual"
+        contradicted = mover is not None and pos.turn == mover and source not in ("manual", "move count")
         doubtful = (not res.walls_consistent) or contradicted
         if self._count < (self.unsure_frames if doubtful else self.stable_frames):
             return None

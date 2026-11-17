@@ -7,3 +7,4 @@ data/
 # live tournament output (force-added when finished)
 results/run.log
 results/rr_*/
+results/gen2/

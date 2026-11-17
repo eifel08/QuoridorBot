@@ -133,22 +133,36 @@ def main(argv=None):
     ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--lam", type=float, default=0.5)
     ap.add_argument("--out", default=str(NET_PATH))
+    ap.add_argument("--wd", type=float, default=0.0, help="weight decay (AdamW)")
+    ap.add_argument("--val-last", action="store_true",
+                    help="validate only on held-out games of the LAST data file (the newest generation); "
+                         "the other files are all used for training")
+    ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args(argv)
-    torch.manual_seed(0)
+    torch.manual_seed(a.seed)
     K = json.loads((NETS_DIR / "linear_weights.json").read_text())["K"]
     games = []
-    for p in a.data:
-        games += [json.loads(l) for l in open(p) if l.strip()]
+    last = len(a.data) - 1
+    for fi, p in enumerate(a.data):
+        part = [json.loads(l) for l in open(p) if l.strip()]
+        for g in part:
+            g["_file"] = fi
+        games += part
     random.Random(0).shuffle(games)
     rows = build(games, K, a.lam)
-    va = [r for r in rows if r[4] % 10 == 0]
-    tr = [r for r in rows if r[4] % 10 != 0]
+    if a.val_last:
+        held = {gi for gi, g in enumerate(games) if g["_file"] == last and gi % 10 == 0}
+        va = [r for r in rows if r[4] in held]
+        tr = [r for r in rows if r[4] not in held]
+    else:
+        va = [r for r in rows if r[4] % 10 == 0]
+        tr = [r for r in rows if r[4] % 10 != 0]
     print(f"{len(tr)} train / {len(va)} val positions, K={K:.4f}", flush=True)
     tr_n, tr_m = tensors(tr), tensors(tr, mirror=True)
     tr_all = [torch.cat([x, y]) for x, y in zip(tr_n, tr_m)]
     va_t = tensors(va)
     net = Net(a.h1, a.h2)
-    opt = torch.optim.Adam(net.parameters(), lr=a.lr)
+    opt = torch.optim.AdamW(net.parameters(), lr=a.lr, weight_decay=a.wd)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, a.epochs)
     bce = nn.functional.binary_cross_entropy_with_logits
     n = tr_all[0].shape[0]
@@ -181,7 +195,8 @@ def main(argv=None):
     export(net, K, Path(a.out))
     (Path(a.out).with_suffix(".json")).write_text(json.dumps(
         {"h1": a.h1, "h2": a.h2, "K": K, "lambda": a.lam, "val_target_logloss": best[0],
-         "train_positions": len(tr), "val_positions": len(va)}, indent=1))
+         "train_positions": len(tr), "val_positions": len(va), "data": a.data, "wd": a.wd,
+         "lr": a.lr, "epochs": a.epochs, "val_last": a.val_last}, indent=1))
     print("wrote", a.out)
 
 

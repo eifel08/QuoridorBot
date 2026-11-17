@@ -11,6 +11,9 @@ engine process for one profile; ``ProfileBot`` is the same thing as a
     book           tuned + opening book
     nnue           turbo search + trained neural evaluation
     hybrid         book -> neural midgame -> tuned linear eval + exact deep endgame search
+
+``net`` is True for the default network (engine/nets/nnue.txt) or the file name of another one
+in engine/nets (e.g. the generation-2 benchmark profiles ``nnue-gen2`` / ``hybrid-gen2``).
 """
 
 from __future__ import annotations
@@ -40,6 +43,10 @@ PROFILES: dict[str, dict] = {
     "hybrid": {"options": {**TURBO, "eval_mode": 3, "hybrid_walls": 6, "endgame_walls": 4},
                "linear": True, "net": True, "book": True},
 }
+#: The same bots with another network (generation benchmarks): "<profile>-<tag>" uses nnue_<tag>.txt.
+for _tag in ("gen1", "gen2", "gen2a", "gen2b", "gen2c"):
+    for _base in ("nnue", "hybrid"):
+        PROFILES[f"{_base}-{_tag}"] = {**PROFILES[_base], "net": f"nnue_{_tag}.txt"}
 
 
 def engine_binary(name: str) -> Path:
@@ -167,9 +174,10 @@ class ProfileEngine:
                 raise EngineError(f"{LINEAR_WEIGHTS} missing (python -m tools.texel_tune)")
             self.engine.command("linweights " + " ".join(LINEAR_WEIGHTS.read_text().split()))
         if prof.get("net"):
-            if not NET_PATH.is_file():
-                raise EngineError(f"{NET_PATH} missing (python -m tools.train_nnue)")
-            self.engine.command(f"loadnet {NET_PATH}")
+            net = NET_PATH if prof["net"] is True else NETS_DIR / prof["net"]
+            if not net.is_file():
+                raise EngineError(f"{net} missing (python -m tools.train_nnue)")
+            self.engine.command(f"loadnet {net}")
         use_book = prof.get("book", False) if book is None else book
         self.book = shared_book() if use_book else None
         self.rng = random.Random(seed) if seed else None

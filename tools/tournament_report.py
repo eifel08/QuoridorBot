@@ -82,7 +82,8 @@ def report(path: Path) -> str:
                 t[k] += s[k]
             t["max_seconds"] = max(t["max_seconds"], s["max_seconds"])
     elo = bt_elo(bots, games)
-    base = elo.get("baseline", 0.0)
+    anchor = "baseline" if "baseline" in bots else bots[0]
+    base = elo.get(anchor, 0.0)
     elo = {k: v - base for k, v in elo.items()}
     rng = random.Random(0)
     boots = defaultdict(list)
@@ -90,7 +91,7 @@ def report(path: Path) -> str:
         sample = [rng.choice(games) for _ in games]
         e = bt_elo(bots, sample, 80)
         for k in bots:
-            boots[k].append(e[k] - e.get("baseline", 0.0))
+            boots[k].append(e[k] - e.get(anchor, 0.0))
     order = sorted(bots, key=lambda b: -elo[b])
 
     lines = [f"## Tournament `{path.name}`: {cfg['time']} s per move, {len(games)} games, "
@@ -109,7 +110,7 @@ def report(path: Path) -> str:
     lines.append("")
     lines.append("### Ranking and engine statistics")
     lines.append("")
-    lines.append("| Rank | Bot | Elo vs baseline (±2σ) | Win % | Win % as Red | Avg game length (plies) | "
+    lines.append(f"| Rank | Bot | Elo vs {anchor} (±2σ) | Win % | Win % as Red | Avg game length (plies) | "
                  "Avg depth | Nodes/s | Avg s/move | Max s/move | Book moves | Time violations |")
     lines.append("|---" * 12 + "|")
     for i, b in enumerate(order, 1):

@@ -430,7 +430,8 @@ int Search::gen_walls(int me, int d_me, int d_opp, const GoalLayers& gl_me, int 
     uint64_t def_v = ((tv << NW) | (tv >> NW) | th) & free_v;
     // Global defense (path-existence) and funnelling walls; see global_defense().
     uint64_t gdef[2] = {0, 0}, fun[2] = {0, 0};
-    if (filter == FILTER_ATTACK_DEFENSE && cfg.def_global && board.walls_left[opp] > 0 && depth >= cfg.def_min_depth) {
+    // Filter 1: extra candidates. Filter 0 (all walls): only their place in the move order.
+    if (filter != FILTER_ATTACK_ONLY && cfg.def_global && board.walls_left[opp] > 0 && depth >= cfg.def_min_depth) {
         const bool funnel = cfg.def_funnel && depth > cfg.def_min_depth;
         DefEntry& e = dcache_[board.hash & (dcache_.size() - 1)];
         if (e.key == board.hash && (e.funnel || !funnel)) {

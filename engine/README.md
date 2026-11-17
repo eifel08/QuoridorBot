@@ -355,6 +355,34 @@ the C++ engine wins **34 of 40 games (85%)**, 75% as Red and 95% as Blue.
 | `decided=1` | `decided=0` | 53.0% (within noise) |
 | `wall_weight=16` | `wall_weight=8` / `12` / `20` / `24` (depth 5) | 64% / 61% / 53% / 59% |
 
+### Blockability-aware evaluation and global defense
+
+Measured on a 4-core cloud VM. "Classic" = `smart_walls=0,def_global=0,lock_decided=0`, i.e. the
+flat (capped) reserve count and local defense only, with the same binary.
+
+| A | B | Setting | A wins |
+|---|---|---|---|
+| default | classic | 0.5 s per move, 100 games | **60.0%** (depth 12.0 vs 13.4) |
+| default | classic | 0.1 s per move, 200 games | 44.5% (depth 10.3 vs 11.8) |
+| blockability eval only (`def_global=0`) | classic | fixed depth 4 / 6 / 8, 100 games | **66%** / 53% / 51% |
+| default | `def_global=0` | fixed depth 4 / 6, 200 games | 54.5% / **61%** |
+
+At equal depth both additions are stronger; they cost about 0.9 ply at equal time (0.7x the
+nodes on 145 positions sampled from self-play; opening 5.5 M vs 6.9 M nodes/s), which the
+knowledge outweighs from about 0.5 s per move on. `smart_dist=6` (analyse only paths of at most 6
+steps) was the best trade-off: analysing every path cost too much depth at 0.1 s per move.
+
+Eval calibration (`python -m tools.calibration --games 150 --time 0.1`, self-play):
+
+| | false win claims, opponent <= 3 steps away | endgame sign accuracy | false win claims overall |
+|---|---|---|---|
+| classic | 6 / 14 (43%) | 83.6% | 16.3% |
+| default | **0 / 26 (0%)** | **97.9%** | 16.5% |
+
+The flat count claimed wins in races the opponent was about to win with a path the walls could
+no longer touch; the blockability eval no longer does. The corridor position in the tests shows
+the extreme case (+59 before, -1 now, forced loss proven at depth 1).
+
 ### Wall weight and the dynamic wall value (0.05 s per move, colours alternated)
 
 | A | B | A wins |

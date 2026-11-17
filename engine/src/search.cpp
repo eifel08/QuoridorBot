@@ -1,8 +1,10 @@
 #include "search.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 
 namespace quoridor {
 
@@ -51,6 +53,8 @@ Search::Search(int hash_mb) {
     ecache_.assign(1 << 15, EvalEntry{});  // 768 KB: stays in the CPU cache
     ecache_mask_ = ecache_.size() - 1;
     dcache_.assign(1 << 14, DefEntry{});  // 640 KB
+    scache_.assign(1 << 15, ShapeEntry{});
+    evcache_.assign(1 << 18, EvCacheEntry{});
     new_game();
 }
 
@@ -66,6 +70,8 @@ void Search::new_game() {
     std::fill(tt_.begin(), tt_.end(), TTEntry{});
     std::fill(ecache_.begin(), ecache_.end(), EvalEntry{});
     std::fill(dcache_.begin(), dcache_.end(), DefEntry{});
+    std::fill(scache_.begin(), scache_.end(), ShapeEntry{});
+    std::fill(evcache_.begin(), evcache_.end(), EvCacheEntry{});
     std::memset(history_, 0, sizeof(history_));
     std::memset(killer_, MOVE_NONE, sizeof(killer_));
     age_ = 0;
@@ -254,7 +260,7 @@ int Search::wall_attack_value(int attacker, int d_target, int& w_eff, int& usefu
     return value;
 }
 
-int Search::evaluate(int me, int d_me, int d_opp) const {
+int Search::evaluate_classic(int me, int d_me, int d_opp) const {
     const int opp = me ^ 1;
     int my_eff, my_useful, opp_eff, opp_useful;
     int my_walls = wall_attack_value(me, d_opp, my_eff, my_useful);
@@ -272,6 +278,193 @@ int Search::evaluate(int me, int d_me, int d_opp) const {
     my_walls += (board.walls_left[me] - my_eff) * cfg.wall_surplus;
     opp_walls += (board.walls_left[opp] - opp_eff) * cfg.wall_surplus;
     return (d_opp - d_me) * cfg.dist_weight + (my_walls - opp_walls) + cfg.tempo_bonus;
+}
+
+int Search::evaluate(int me, int d_me, int d_opp) const {
+    if (cfg.eval_mode == 0) return evaluate_classic(me, d_me, d_opp);
+    if (cfg.eval_mode == 1) return evaluate_linear(me, d_me, d_opp);
+    EvCacheEntry& ce = evcache_[board.hash & (evcache_.size() - 1)];
+    if (ce.key == board.hash) return ce.value;
+    int v;
+    switch (cfg.eval_mode) {
+        case 2: v = net.loaded() ? evaluate_net(me, d_me, d_opp) : evaluate_linear(me, d_me, d_opp); break;
+        case 3:
+            v = net.loaded() && phase() >= cfg.hybrid_walls ? evaluate_net(me, d_me, d_opp)
+                                                            : evaluate_linear(me, d_me, d_opp);
+            break;
+        default: v = evaluate_linear(me, d_me, d_opp); break;
+    }
+    ce.key = board.hash;
+    ce.value = v;
+    return v;
+}
+
+// --------------------------------------------------------------------------
+// Shape of the shortest-path DAG of `target`: number of single-square layers
+// (squares every shortest path must cross) and log2 of the number of distinct
+// shortest paths. Cached on walls + the target's pawn.
+// --------------------------------------------------------------------------
+void Search::path_shape(int target, int& narrow, int& log_paths) const {
+    const uint64_t walls_key = board.hash ^ ZOB.pawn[0][board.pawn[0]] ^ ZOB.pawn[1][board.pawn[1]] ^
+                               ZOB.walls_left[0][board.walls_left[0]] ^ ZOB.walls_left[1][board.walls_left[1]] ^
+                               (board.turn ? ZOB.turn : 0);
+    const uint64_t key = (walls_key ^ ZOB.pawn[target][board.pawn[target]] ^ (target ? 0x7A3D5C1E9B2F4861ULL : 0x1F83D9ABFB41BD6BULL)) | 1;
+    ShapeEntry& e = scache_[key & (scache_.size() - 1)];
+    if (e.key == key) {
+        narrow = e.narrow;
+        log_paths = e.log_paths;
+        return;
+    }
+    GoalLayers gl;
+    board.goal_layers(target, gl, board.pawn[target]);
+    const int D = gl.dist(board.pawn[target]);
+    narrow = 0;
+    log_paths = 0;
+    if (D > 1) {
+        // Layer k = squares k steps from the pawn and D - k from the goal.
+        // narrow: one-square layers; log_paths: layers with 3+ squares (many routes).
+        BB layer = BB::square(board.pawn[target]);
+        for (int k = 1; k < D; ++k) {
+            layer = board.expand(layer) & gl.layer[D - k];
+            const int w = popcount(layer);
+            if (w == 1) ++narrow;
+            else if (w >= 3) ++log_paths;
+        }
+        log_paths = std::min(log_paths, 15);
+    }
+    e.key = key;
+    e.narrow = int8_t(narrow);
+    e.log_paths = int8_t(log_paths);
+}
+
+void Search::features(int me, int d_me, int d_opp, int* f) const {
+    const int opp = me ^ 1;
+    struct Counts { int full = 0, low = 0, tie = 0, useful = 0, eff = 0, surplus = 0; };
+    auto counts = [&](int attacker, int d_target) {
+        Counts c;
+        const int w = board.walls_left[attacker];
+        c.eff = cfg.wall_cap ? std::min(w, d_target + cfg.wall_cap_slack) : w;
+        if (c.eff < 0) c.eff = 0;
+        c.surplus = w - c.eff;
+        if (c.eff == 0) return c;
+        if (d_target > cfg.smart_dist) {
+            c.full = c.useful = c.eff;
+            return c;
+        }
+        const PathInfo pi = path_info(attacker ^ 1, d_target);
+        for (int i = 0; i < pi.nsteps && c.useful < c.eff; ++i) {
+            if (pi.rich[i]) {
+                c.full += c.eff - c.useful;
+                c.useful = c.eff;
+                break;
+            }
+            if (pi.gain[i] >= 2) ++c.full;
+            else if (pi.gain[i] == 1) ++c.low;
+            else ++c.tie;
+            ++c.useful;
+        }
+        if (c.useful < c.eff && pi.trunc) {
+            c.full += c.eff - c.useful;
+            c.useful = c.eff;
+        }
+        return c;
+    };
+    const Counts m = counts(me, d_opp), o = counts(opp, d_me);
+    const int m_rest = m.eff - m.useful, o_rest = o.eff - o.useful;
+    const int m_def = std::min(m_rest, o.useful), o_def = std::min(o_rest, m.useful);
+    f[F_DIST] = d_opp - d_me;
+    f[F_WALL_FULL] = m.full - o.full;
+    f[F_WALL_LOW] = m.low - o.low;
+    f[F_WALL_DEF] = m_def - o_def;
+    f[F_WALL_TIE] = (m.tie + m_rest - m_def) - (o.tie + o_rest - o_def);
+    f[F_WALL_SURPLUS] = m.surplus - o.surplus;
+    f[F_TEMPO] = 1;
+    int nm, lm, no, lo;
+    path_shape(me, nm, lm);
+    path_shape(opp, no, lo);
+    f[F_NARROW] = no - nm;
+    f[F_PATHS] = lm - lo;
+    f[F_DIST_PROD] = 40 * (d_opp - d_me) / (d_me + d_opp + 2);
+}
+
+int Search::evaluate_linear(int me, int d_me, int d_opp) const {
+    int f[NFEAT];
+    features(me, d_me, d_opp, f);
+    int a = 0, b = 0;
+    for (int i = 0; i < NFEAT; ++i) {
+        a += lin_w[0][i] * f[i];
+        b += lin_w[1][i] * f[i];
+    }
+    const int ph = std::min(20, phase());
+    return (a * ph + b * (20 - ph)) / 20;
+}
+
+bool Net::load(const char* path) {
+    std::ifstream in(path);
+    if (!in) return false;
+    int a, b;
+    float sc;
+    if (!(in >> a >> b >> sc) || a <= 0 || b <= 0 || a > 1024 || b > 256) return false;
+    auto read = [&](std::vector<float>& v, size_t n) {
+        v.resize(n);
+        for (auto& x : v)
+            if (!(in >> x)) return false;
+        return true;
+    };
+    std::vector<float> nb3;
+    if (!read(w1, size_t(NSPARSE) * a) || !read(b1, a) || !read(w2, size_t(a + NDENSE) * b) || !read(b2, b) ||
+        !read(w3, b) || !read(nb3, 1)) {
+        h1 = 0;
+        return false;
+    }
+    b3 = nb3[0];
+    h1 = a;
+    h2 = b;
+    out_scale = sc;
+    return true;
+}
+
+int Search::evaluate_net(int me, int d_me, int d_opp) const {
+    const int opp = me ^ 1;
+    const bool flip = me == 1;  // the side to move always walks "up"
+    int idx[32], n = 0;
+    auto sq_of = [&](int sq) { return flip ? (N - 1 - sq / N) * N + sq % N : sq; };
+    auto an_of = [&](int a) { return flip ? (NW - 1 - a / NW) * NW + a % NW : a; };
+    idx[n++] = sq_of(board.pawn[me]);
+    idx[n++] = NSQ + sq_of(board.pawn[opp]);
+    for (uint64_t x = board.hw; x && n < 30; x &= x - 1) idx[n++] = 2 * NSQ + an_of(std::countr_zero(x));
+    for (uint64_t x = board.vw; x && n < 30; x &= x - 1) idx[n++] = 2 * NSQ + NWALL + an_of(std::countr_zero(x));
+    const int wbase = 2 * NSQ + 2 * NWALL;
+    idx[n++] = wbase + board.walls_left[me];
+    idx[n++] = wbase + MAX_WALLS + 1 + board.walls_left[opp];
+
+    const int H1 = net.h1, H2 = net.h2;
+    float x[1024 + Net::NDENSE];
+    std::memcpy(x, net.b1.data(), sizeof(float) * H1);
+    for (int k = 0; k < n; ++k) {
+        const float* w = &net.w1[size_t(idx[k]) * H1];
+        for (int j = 0; j < H1; ++j) x[j] += w[j];
+    }
+    for (int j = 0; j < H1; ++j) x[j] = std::clamp(x[j], 0.0f, 1.0f);
+    int f[NFEAT];
+    features(me, d_me, d_opp, f);
+    for (int i = 0; i < NFEAT; ++i) x[H1 + i] = f[i] * 0.1f;
+    x[H1 + NFEAT] = d_me * 0.1f;
+    x[H1 + NFEAT + 1] = d_opp * 0.1f;
+    x[H1 + NFEAT + 2] = phase() * 0.05f;
+    const int NI = H1 + Net::NDENSE;
+    float h[256];
+    std::memcpy(h, net.b2.data(), sizeof(float) * H2);
+    for (int i = 0; i < NI; ++i) {
+        const float xi = x[i];
+        if (xi == 0.0f) continue;
+        const float* w = &net.w2[size_t(i) * H2];
+        for (int j = 0; j < H2; ++j) h[j] += xi * w[j];
+    }
+    float out = net.b3;
+    for (int j = 0; j < H2; ++j) out += std::max(h[j], 0.0f) * net.w3[j];
+    const float v = std::clamp(out * net.out_scale, -2000.0f, 2000.0f);
+    return int(std::lround(v));
 }
 
 // --------------------------------------------------------------------------
@@ -646,6 +839,10 @@ int Search::negamax(int depth, int alpha, int beta, int ply, int d_me, int d_opp
         if (v != INF) return v;
     }
     if (ply >= MAX_PLY - 1) return evaluate(me, d_me, d_opp);
+    path_[ply] = board.hash;
+    if (cfg.repetition && !root)
+        for (int j = ply - 4; j >= 0; j -= 2)
+            if (path_[j] == board.hash) return 0;  // shuffling back and forth: a draw
     if (depth <= 0) return quiesce(alpha, beta, ply, d_me, d_opp);
 
     // ---- transposition table ----
@@ -680,22 +877,34 @@ int Search::negamax(int depth, int alpha, int beta, int ply, int d_me, int d_opp
     int tried = 0;
 
     // Searches one move; returns true if the node is finished (cutoff or stop).
-    auto search_move = [&](Move m, int nd_me, int nd_opp) -> bool {
+    auto search_move = [&](Move m, int nd_me, int nd_opp, int reduction = 0) -> bool {
+        if (root && root_exclude_[m]) return false;
         ++tried;
         int val;
         const int prev = board.make(m);
         if (is_pawn(m) && nd_me == 0)
             val = WIN - (ply + 1);  // reached the goal row
-        else if (cfg.alphabeta)
-            val = -negamax(depth - 1, -beta, -alpha, ply + 1, nd_opp, nd_me);
-        else
+        else if (!cfg.alphabeta)
             val = -negamax(depth - 1, -INF, INF, ply + 1, nd_opp, nd_me);
+        else if (tried > 1 && (cfg.pvs || reduction > 0)) {
+            // Scout with a null window (and the reduction); re-search only if it beats alpha.
+            const int nw = cfg.pvs ? alpha + 1 : beta;
+            val = -negamax(depth - 1 - reduction, -nw, -alpha, ply + 1, nd_opp, nd_me);
+            if (!stop_ && val > alpha && reduction > 0)
+                val = -negamax(depth - 1, -nw, -alpha, ply + 1, nd_opp, nd_me);
+            if (!stop_ && val > alpha && val < beta && nw != beta)
+                val = -negamax(depth - 1, -beta, -alpha, ply + 1, nd_opp, nd_me);
+        } else
+            val = -negamax(depth - 1, -beta, -alpha, ply + 1, nd_opp, nd_me);
         board.unmake(m, prev);
         if (stop_) return true;
         if (val > best) {
             best = val;
             best_move = m;
-            if (root) root_best_ = m;
+            if (root) {
+                root_best_ = m;
+                if (val > root_alpha_) root_ok_ = true;
+            }
         }
         if (val > alpha) alpha = val;
         if (cfg.alphabeta && alpha >= beta) {
@@ -785,13 +994,23 @@ int Search::negamax(int depth, int alpha, int beta, int ply, int d_me, int d_opp
             }
             if (root && cfg.seed) cand[i].score += int32_t(xorshift(rng_) & 7);
         }
+        // Late move reductions: never for the first moves, killers, walls that lengthen the
+        // opponent's path, or when either side is about to arrive (blocks are then tactical).
+        const bool can_reduce = cfg.lmr && !root && depth >= cfg.lmr_min_depth && d_opp > 2 && d_me > 1;
         for (int i = 0; i < n && !done; ++i) {
             int bi = i;
             for (int j = i + 1; j < n; ++j)
                 if (cand[j].score > cand[bi].score) bi = j;
             std::swap(cand[i], cand[bi]);
             if (cand[i].move == tt_move) continue;
-            done = search_move(cand[i].move, cand[i].d_me, cand[i].d_opp);
+            int r = 0;
+            if (can_reduce && tried >= cfg.lmr_min_moves && cand[i].score < SCORE_KILLER - 1 &&
+                cand[i].d_opp <= d_opp) {
+                r = 1;
+                if (tried >= 3 * cfg.lmr_min_moves + 6 && depth >= 5) r = 2;
+                if (cand[i].score >= TIER_ATTACK && r > 1) r = 1;  // attack walls cutting a route
+            }
+            done = search_move(cand[i].move, cand[i].d_me, cand[i].d_opp, r);
         }
     }
 
@@ -816,7 +1035,8 @@ SearchResult Search::go(int max_depth, double time_limit) {
     SearchResult res;
     max_depth = std::clamp(max_depth, 1, MAX_DEPTH);
     timed_ = time_limit > 0;
-    if (timed_) deadline_ = start + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(time_limit));
+    if (timed_) deadline_ = start + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(
+                                    cfg.smart_time ? time_limit * 0.97 - 0.005 : time_limit));
     stop_ = false;
     nodes_ = 0;
     ++age_;
@@ -825,14 +1045,66 @@ SearchResult Search::go(int max_depth, double time_limit) {
     root_hint_ = MOVE_NONE;
 
     const int d_me = board.distance(board.turn), d_opp = board.distance(board.turn ^ 1);
+    // Endgame phase: deep exact search, no unsound reductions.
+    const Config saved = cfg;
+    const bool endgame = cfg.endgame_walls >= 0 &&
+                         (phase() <= cfg.endgame_walls || board.walls_left[0] == 0 || board.walls_left[1] == 0);
+    if (endgame) {
+        cfg.lmr = false;
+        cfg.futility = false;
+        cfg.wall_zone = -1;
+    }
+    {  // a single legal move needs no search
+        MoveList ml;
+        board.legal_moves(ml);
+        if (ml.n == 1 && cfg.smart_time) {
+            res.best = ml.m[0];
+            res.depth = 0;
+            cfg = saved;
+            res.seconds = elapsed();
+            return res;
+        }
+    }
+    double last_iter = 0, prev_iter = 0;
     for (int depth = 1; depth <= max_depth; ++depth) {
+        const double iter_start = elapsed();
         root_best_ = MOVE_NONE;
-        const int score = negamax(depth, -INF, INF, 0, d_me, d_opp);
-        if (stop_) break;  // unfinished iteration: keep the previous depth's move
+        root_ok_ = false;
+        int score;
+        if (cfg.aspiration > 0 && depth >= 4 && std::abs(root_scores_[depth - 2]) < WIN_THRESHOLD) {
+            // Window around the score of the same parity (the tempo makes odd/even depths differ).
+            int delta = cfg.aspiration;
+            const int center = root_scores_[depth - 2];
+            int lo = center - delta, hi = center + delta;
+            for (;;) {
+                root_best_ = MOVE_NONE;
+                root_ok_ = false;
+                root_alpha_ = lo;
+                score = negamax(depth, lo, hi, 0, d_me, d_opp);
+                if (stop_) break;
+                if (score <= lo) lo = std::max(-INF, lo - 4 * delta);
+                else if (score >= hi) hi = std::min(INF, hi + 4 * delta);
+                else break;
+                delta *= 4;
+                if (delta > 400) { lo = -INF; hi = INF; }
+            }
+        } else {
+            root_alpha_ = -INF;
+            score = negamax(depth, -INF, INF, 0, d_me, d_opp);
+        }
+        if (stop_) {
+            // Partial iteration: its best move is a deeper result than the previous depth's
+            // as long as it was not a fail-low against the aspiration window.
+            if (cfg.smart_time && root_best_ != MOVE_NONE && root_ok_) res.best = root_best_;
+            break;
+        }
         res.best = root_best_;
         res.score = score;
         res.depth = depth;
+        root_scores_[depth] = score;
         root_hint_ = root_best_;
+        prev_iter = last_iter;
+        last_iter = elapsed() - iter_start;
         if (cfg.verbose) {
             std::printf("info depth %d score %d nodes %llu time %.3f\n", depth, score,
                         static_cast<unsigned long long>(nodes_), elapsed());
@@ -841,13 +1113,27 @@ SearchResult Search::go(int max_depth, double time_limit) {
         if (res.best == MOVE_NONE) break;  // no legal move at all
         // A win/loss that lies inside the searched horizon is final.
         if (std::abs(score) >= WIN_THRESHOLD && WIN - std::abs(score) <= depth) break;
-        // The next iteration would not finish in the remaining time anyway.
-        if (timed_ && elapsed() >= 0.5 * time_limit) break;
+        if (timed_) {
+            if (!cfg.smart_time) {
+                if (elapsed() >= 0.5 * time_limit) break;  // the next iteration would not finish
+            } else {
+                // Predict the next iteration from the growth of the last two.
+                const double growth = prev_iter > 1e-4 ? std::clamp(last_iter / prev_iter, 1.5, 8.0) : 4.0;
+                const double left = time_limit - elapsed();
+                // Starting is still useful if the PV move alone (about a third) can finish.
+                if (last_iter * growth * 0.35 > left) break;
+            }
+        }
     }
+    cfg = saved;
     if (res.best == MOVE_NONE) {  // out of time before depth 1 finished
         MoveList ml;
         ordered_moves(ml);
-        if (ml.n > 0) res.best = ml.m[0];
+        for (int i = 0; i < ml.n; ++i)
+            if (!root_exclude_[ml.m[i]]) {
+                res.best = ml.m[i];
+                break;
+            }
     }
     res.nodes = nodes_;
     res.seconds = elapsed();

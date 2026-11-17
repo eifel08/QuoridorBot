@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "board.h"
@@ -71,8 +72,54 @@ struct Config {
     int wall_recovery = 5;        // futility margin per wall the side to move still has
     int depth_margin = 5;         // futility margin per remaining ply
 
+    // ---- bot evolution (see docs/bot-evolution-plan.md); all off = the baseline search ----
+    bool smart_time = false;  // predicted iteration cost, up to ~95% of the limit, keep partial iterations
+    bool pvs = false;         // principal variation search (null-window scouts + re-search)
+    int aspiration = 0;       // > 0: aspiration window half-width around the score of depth - 2
+    bool lmr = false;         // late move reductions for quiet / late moves
+    int lmr_min_moves = 3;    // moves tried at a node before reductions start
+    int lmr_min_depth = 3;    // remaining depth needed to reduce
+    bool repetition = false;  // a position repeated on the search path scores as a draw
+    // Evaluation: 0 = classic (hand-set), 1 = tuned linear features with phase taper,
+    // 2 = neural (NNUE-style, loadnet), 3 = hybrid (neural while total walls >= hybrid_walls,
+    // tuned linear below).
+    int eval_mode = 0;
+    int hybrid_walls = 6;
+    // Endgame phase: with at most this many walls left in total (or one side out of walls) the
+    // root disables the unsound prunings (LMR, futility) and widens the wall zone: a deep,
+    // exact alpha-beta for the race. -1 = never.
+    int endgame_walls = -1;
+
     uint64_t seed = 0;  // != 0: break ties between equally ordered root moves at random
     bool verbose = false;  // print one "info" line per completed depth
+};
+
+// Linear evaluation features (eval_mode 1), all "me minus opponent" from the side to move.
+enum Feature {
+    F_DIST = 0,     // opponent distance - my distance
+    F_WALL_FULL,    // walls counted at full value (rich path / block of 2+ steps)
+    F_WALL_LOW,     // walls that block exactly one step
+    F_WALL_DEF,     // non-attacking walls kept back for defense
+    F_WALL_TIE,     // walls that cannot lengthen the opponent's path
+    F_WALL_SURPLUS, // walls above the cap
+    F_TEMPO,        // constant 1 (side to move)
+    F_NARROW,       // single-square layers of the opponent's shortest-path DAG minus mine
+    F_PATHS,        // shortest-path layers with 3+ squares (many routes), mine minus opponent's
+    F_DIST_PROD,    // (d_opp - d_me) scaled by closeness: 10 * diff / (d_me + d_opp + 2)
+    NFEAT
+};
+
+// Small NNUE-style network: sparse binary inputs (pawn squares, wall slots and wall
+// counts, side-to-move perspective) into an accumulator, concatenated with the
+// linear features, then one hidden layer. Output in evaluation units.
+struct Net {
+    static constexpr int NSPARSE = 2 * NSQ + 2 * NWALL + 2 * (MAX_WALLS + 1);  // 312
+    static constexpr int NDENSE = NFEAT + 3;
+    int h1 = 0, h2 = 0;
+    std::vector<float> w1, b1, w2, b2, w3;  // w1: NSPARSE x h1, w2: (h1 + NDENSE) x h2, w3: h2
+    float b3 = 0, out_scale = 1;
+    bool loaded() const { return h1 > 0; }
+    bool load(const char* path);
 };
 
 struct SearchResult {
@@ -96,6 +143,17 @@ public:
     SearchResult go(int max_depth, double time_limit);
 
     int evaluate(int me, int d_me, int d_opp) const;
+    int evaluate_classic(int me, int d_me, int d_opp) const;
+    // Linear features of the position (eval_mode 1) and the phase (total walls left, 0..20).
+    void features(int me, int d_me, int d_opp, int* f) const;
+    int phase() const { return board.walls_left[0] + board.walls_left[1]; }
+    int evaluate_linear(int me, int d_me, int d_opp) const;
+    int evaluate_net(int me, int d_me, int d_opp) const;
+    // Tuned weights: weights[0] at phase 20 (all walls), weights[1] at phase 0.
+    int lin_w[2][NFEAT] = {{10, 16, 10, 6, 1, 1, 5, 0, 0, 0}, {10, 16, 10, 6, 1, 1, 5, 0, 0, 0}};
+    Net net;
+    // Shape of a player's shortest-path DAG: single-square layers and log2 of the path count.
+    void path_shape(int target, int& narrow, int& log_paths) const;
 
     // Cached blockability of `target`'s path: the greedy chain of single-wall
     // blocks the other player could make (see board.h, Blockability).
@@ -109,6 +167,7 @@ public:
     // Value of `attacker`'s wall reserve against `target` (eval units). `w_eff`:
     // walls that count at all, `useful`: of those, the ones that can lengthen the path.
     int wall_attack_value(int attacker, int d_target, int& w_eff, int& useful) const;
+    bool root_exclude_[NMOVES + 1] = {};  // root moves the next go() must not play (book building)
     // Moves in the order the search would try them at the root (debugging / tests).
     void ordered_moves(MoveList& out);
 
@@ -144,6 +203,20 @@ private:
         uint64_t key = 0;
         DefInfo info;
     };
+    struct ShapeEntry {
+        uint64_t key = 0;
+        int8_t narrow = 0, log_paths = 0;
+    };
+    mutable std::vector<ShapeEntry> scache_;
+    struct EvCacheEntry {
+        uint64_t key = 0;
+        int32_t value = 0;
+    };
+    mutable std::vector<EvCacheEntry> evcache_;  // static evals (eval_mode >= 1)
+    uint64_t path_[MAX_PLY + 2];  // hashes along the search path (repetition)
+    int root_scores_[MAX_DEPTH + 2];
+    bool root_ok_ = false;  // root_best_ of the running iteration is a real (non fail-low) result
+    int root_alpha_ = -INF;
     mutable std::vector<DefEntry> dcache_;
     mutable std::vector<EvalEntry> ecache_;  // allocated once; no allocation during the search
     uint64_t ecache_mask_ = 0;

@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -126,6 +127,16 @@ bool set_option(Search& s, const std::string& name, const std::string& value, st
     else if (name == "futility") c.futility = v != 0;
     else if (name == "wall_recovery") c.wall_recovery = int(v);
     else if (name == "depth_margin") c.depth_margin = int(v);
+    else if (name == "smart_time") c.smart_time = v != 0;
+    else if (name == "pvs") c.pvs = v != 0;
+    else if (name == "aspiration") c.aspiration = int(v);
+    else if (name == "lmr") c.lmr = v != 0;
+    else if (name == "lmr_min_moves") c.lmr_min_moves = int(std::clamp(v, 1L, 64L));
+    else if (name == "lmr_min_depth") c.lmr_min_depth = int(std::clamp(v, 2L, 64L));
+    else if (name == "repetition") c.repetition = v != 0;
+    else if (name == "eval_mode") c.eval_mode = int(std::clamp(v, 0L, 3L));
+    else if (name == "hybrid_walls") c.hybrid_walls = int(v);
+    else if (name == "endgame_walls") c.endgame_walls = int(v);
     else if (name == "seed") { c.seed = std::strtoull(value.c_str(), nullptr, 10); return true; }
     else if (name == "verbose") { c.verbose = v != 0; return true; }
     else if (name == "hash_mb") { s.resize_tt(int(v)); }
@@ -233,11 +244,20 @@ int main() {
             int depth = MAX_DEPTH;
             double time_limit = 0;
             std::string key;
+            std::fill(std::begin(search.root_exclude_), std::end(search.root_exclude_), false);
             while (in >> key) {
                 if (key == "depth") in >> depth;
                 else if (key == "time") in >> time_limit;
+                else if (key == "exclude") {
+                    std::string tok;
+                    while (in >> tok) {
+                        const Move m = parse_move(tok);
+                        if (m != MOVE_NONE) search.root_exclude_[m] = true;
+                    }
+                }
             }
             const SearchResult r = search.go(depth, time_limit);
+            std::fill(std::begin(search.root_exclude_), std::end(search.root_exclude_), false);
             char buf[160];
             std::snprintf(buf, sizeof buf, "bestmove %s depth %d score %d nodes %llu time %.4f",
                           move_str(r.best).c_str(), r.depth, r.score,
@@ -300,6 +320,37 @@ int main() {
                 const char* cls = !(((h ? rh : rv) >> a) & 1) ? "dead" : !(((h ? zh : zv) >> a) & 1) ? "off" : "route";
                 out = std::string("wallclass ") + cls;
                 for (int p = 0; p < 2; ++p) out += " " + std::to_string(b.distance_with_wall(p, m) - b.distance(p));
+            }
+        } else if (cmd == "features") {
+            // Linear evaluation features of the side to move, then d_me d_opp phase.
+            const Board& b = search.board;
+            const int me = b.turn, dm = b.distance(me), dopp = b.distance(me ^ 1);
+            int f[NFEAT];
+            search.features(me, dm, dopp, f);
+            out = "features";
+            for (int i = 0; i < NFEAT; ++i) out += " " + std::to_string(f[i]);
+            out += " " + std::to_string(dm) + " " + std::to_string(dopp) + " " + std::to_string(search.phase());
+        } else if (cmd == "linweights") {
+            // 2 * NFEAT integers: the weights at phase 20 (all walls), then at phase 0.
+            int w[2][NFEAT];
+            bool okw = true;
+            for (int k = 0; k < 2 && okw; ++k)
+                for (int i = 0; i < NFEAT && okw; ++i) okw = bool(in >> w[k][i]);
+            if (okw) {
+                std::memcpy(search.lin_w, w, sizeof w);
+                search.new_game();
+                out = "ok";
+            } else {
+                out = "error linweights needs " + std::to_string(2 * NFEAT) + " integers";
+            }
+        } else if (cmd == "loadnet") {
+            std::string path;
+            std::getline(in >> std::ws, path);
+            if (search.net.load(path.c_str())) {
+                search.new_game();
+                out = "ok";
+            } else {
+                out = "error cannot load net '" + path + "'";
             }
         } else if (cmd == "hash") {
             out = "hash " + std::to_string(search.board.hash);

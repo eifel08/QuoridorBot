@@ -22,6 +22,10 @@ BOT_PRESETS: tuple[tuple[str, str], ...] = (
     ("All walls: C++, 2 s", "ab:depth=30,time=2,walls=all"),
     ("Classic eval (flat wall value): C++, 1 s", "ab:depth=30,time=1,smart_walls=0,def_global=0,lock_decided=0"),
     ("Python alpha-beta, depth 4", "ab:depth=4,engine=py"),
+    ("Hybrid 3-phase (book + NNUE + endgame), 5 s", "profile:name=hybrid,time=5"),
+    ("Book + tuned eval + turbo search, 5 s", "profile:name=book,time=5"),
+    ("NNUE eval + turbo search, 5 s", "profile:name=nnue,time=5"),
+    ("Turbo search (classic eval), 5 s", "profile:name=turbo,time=5"),
 )
 
 CUSTOM_LABEL = "Custom spec..."

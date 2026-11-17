@@ -1,0 +1,208 @@
+"""Named bot profiles for the bot-evolution tournament (docs/bot-evolution-plan.md).
+
+Every profile is the C++ engine with a set of options, optionally tuned linear
+weights, a trained network and an opening book. ``ProfileEngine`` wraps one
+engine process for one profile; ``ProfileBot`` is the same thing as a
+:class:`~quoridor.player.Player` for the GUI / CLI (bot spec ``profile:NAME``).
+
+    baseline       the engine of main before this work (frozen source, engine/baseline/)
+    turbo          + smart time management, PVS, aspiration windows, LMR, repetition, bigger TT
+    tuned          turbo + Texel-tuned phase-tapered linear eval with path-shape features
+    book           tuned + opening book
+    nnue           turbo search + trained neural evaluation
+    hybrid         book -> neural midgame -> tuned linear eval + exact deep endgame search
+"""
+
+from __future__ import annotations
+
+import json
+import random
+from pathlib import Path
+from typing import Optional
+
+from .alphabeta import FastBoard
+from .cpp_engine import ENGINE_DIR, CppEngine, EngineError, fastboard_command, parse_move, to_imove
+
+BUILD_DIR = ENGINE_DIR / "build"
+NETS_DIR = ENGINE_DIR / "nets"
+BOOK_PATH = ENGINE_DIR / "book" / "book.json"
+LINEAR_WEIGHTS = NETS_DIR / "linear_weights.txt"
+NET_PATH = NETS_DIR / "nnue.txt"
+
+TURBO = {"smart_time": 1, "pvs": 1, "aspiration": 15, "lmr": 1, "repetition": 1, "hash_mb": 128}
+
+PROFILES: dict[str, dict] = {
+    "baseline": {"binary": "quoridor_engine_baseline", "options": {"hash_mb": 128}},
+    "turbo": {"options": dict(TURBO)},
+    "tuned": {"options": {**TURBO, "eval_mode": 1}, "linear": True},
+    "book": {"options": {**TURBO, "eval_mode": 1}, "linear": True, "book": True},
+    "nnue": {"options": {**TURBO, "eval_mode": 2}, "linear": True, "net": True},
+    "hybrid": {"options": {**TURBO, "eval_mode": 3, "hybrid_walls": 6, "endgame_walls": 4},
+               "linear": True, "net": True, "book": True},
+}
+
+
+def engine_binary(name: str) -> Path:
+    import os
+    exe = name + (".exe" if os.name == "nt" else "")
+    return BUILD_DIR / exe
+
+
+# ---------------------------------------------------------------------- #
+# Symmetry: book positions are stored canonically (side to move = player 0,
+# then the smaller of the position and its left-right mirror).
+# ---------------------------------------------------------------------- #
+N, NW = 9, 8
+
+
+def _sq(sq: int, flip: bool, mirror: bool) -> int:
+    r, c = divmod(sq, N)
+    return (N - 1 - r if flip else r) * N + (N - 1 - c if mirror else c)
+
+
+def _an(a: int, flip: bool, mirror: bool) -> int:
+    r, c = divmod(a, NW)
+    return (NW - 1 - r if flip else r) * NW + (NW - 1 - c if mirror else c)
+
+
+def _key(board: FastBoard, flip: bool, mirror: bool) -> str:
+    me, opp = (1, 0) if flip else (0, 1)
+    h = sorted(_an(a, flip, mirror) for a in board.h)
+    v = sorted(_an(a, flip, mirror) for a in board.v)
+    return (f"{_sq(board.pawns[me], flip, mirror)},{_sq(board.pawns[opp], flip, mirror)},"
+            f"{board.walls_left[me]},{board.walls_left[opp]}|" + ".".join(map(str, h)) + "|" + ".".join(map(str, v)))
+
+
+def canonical(board: FastBoard) -> tuple[str, bool, bool]:
+    """(key, flip, mirror): the transform that maps the real board to the stored one."""
+    flip = board.turn == 1
+    k0, k1 = _key(board, flip, False), _key(board, flip, True)
+    return (k0, flip, False) if k0 <= k1 else (k1, flip, True)
+
+
+def transform_move(text: str, flip: bool, mirror: bool) -> str:
+    """Engine move text through a transform (each transform is its own inverse)."""
+    kind, r, c = text[0], int(text[1]), int(text[2])
+    if kind == "m":
+        sq = _sq(r * N + c, flip, mirror)
+        return f"m{sq // N}{sq % N}"
+    a = _an(r * NW + c, flip, mirror)
+    return f"{kind}{a // NW}{a % NW}"
+
+
+class OpeningBook:
+    """canonical key -> list of [move, weight] (moves in canonical coordinates)."""
+
+    def __init__(self, path: Path = BOOK_PATH) -> None:
+        self.path = Path(path)
+        self.entries: dict[str, list] = {}
+        if self.path.is_file():
+            data = json.loads(self.path.read_text())
+            self.entries = data.get("positions", data)
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    def probe(self, board: FastBoard, rng: Optional[random.Random] = None) -> Optional[str]:
+        key, flip, mirror = canonical(board)
+        moves = self.entries.get(key)
+        if not moves:
+            return None
+        if rng is None or len(moves) == 1:
+            move = max(moves, key=lambda m: m[1])[0]
+        else:
+            move = rng.choices([m[0] for m in moves], weights=[m[1] for m in moves])[0]
+        return transform_move(move, flip, mirror)
+
+
+_BOOK: Optional[OpeningBook] = None
+
+
+def shared_book() -> OpeningBook:
+    global _BOOK
+    if _BOOK is None:
+        _BOOK = OpeningBook()
+    return _BOOK
+
+
+class ProfileEngine:
+    """One engine process configured as a profile. ``go(board, time)`` -> (move text, info)."""
+
+    def __init__(self, name: str, seed: int = 0) -> None:
+        if name not in PROFILES:
+            raise EngineError(f"unknown profile '{name}' (known: {', '.join(PROFILES)})")
+        self.name = name
+        prof = PROFILES[name]
+        binary = engine_binary(prof.get("binary", "quoridor_engine"))
+        if not binary.is_file():
+            raise EngineError(f"{binary} not built (make -C engine && make -C engine baseline)")
+        self.engine = CppEngine(str(binary), prof["options"])
+        if prof.get("linear"):
+            if not LINEAR_WEIGHTS.is_file():
+                raise EngineError(f"{LINEAR_WEIGHTS} missing (python -m tools.texel_tune)")
+            self.engine.command("linweights " + " ".join(LINEAR_WEIGHTS.read_text().split()))
+        if prof.get("net"):
+            if not NET_PATH.is_file():
+                raise EngineError(f"{NET_PATH} missing (python -m tools.train_nnue)")
+            self.engine.command(f"loadnet {NET_PATH}")
+        self.book = shared_book() if prof.get("book") else None
+        self.rng = random.Random(seed) if seed else None
+
+    def new_game(self) -> None:
+        self.engine.new_game()
+
+    def go(self, board: FastBoard, time_limit: float, depth: int = 64) -> tuple[Optional[str], dict]:
+        if self.book is not None:
+            move = self.book.probe(board, self.rng)
+            if move is not None:
+                return move, {"book": True, "depth_reached": 0, "nodes": 0, "seconds": 0.0, "value": 0}
+        self.engine.set_position(fastboard_command(board))
+        move, info = self.engine.go(depth, time_limit)
+        info["book"] = False
+        return (info["move"] if move is not None else None), info
+
+    def close(self) -> None:
+        self.engine.close()
+
+
+def imove(text: str):
+    return to_imove(parse_move(text))
+
+
+# ---------------------------------------------------------------------- #
+# Player for the GUI / CLI / Auto-Play (bot spec "profile:name=hybrid,time=5")
+# ---------------------------------------------------------------------- #
+from .cpp_engine import CppBot  # noqa: E402
+
+
+class ProfileBot(CppBot):
+    """A profile as a :class:`~quoridor.player.Player` (book move if any, else the engine)."""
+
+    def __init__(self, name: str, profile: str, time_limit: Optional[float] = 5.0, depth: int = 30) -> None:
+        if profile not in PROFILES:
+            raise EngineError(f"unknown profile '{profile}' (known: {', '.join(PROFILES)})")
+        super().__init__(name, depth, time_limit, dict(PROFILES[profile]["options"]))
+        self.profile = profile
+        self._pe: Optional[ProfileEngine] = None
+
+    @property
+    def engine(self) -> CppEngine:
+        if self._pe is None:
+            self._pe = ProfileEngine(self.profile, seed=random.getrandbits(31) | 1)
+            self._engine = self._pe.engine
+        return self._pe.engine
+
+    def get_move(self, board_state):
+        _ = self.engine
+        if self._pe.book is not None:
+            text = self._pe.book.probe(FastBoard(board_state), self._pe.rng)
+            if text is not None:
+                self.last_info = {"engine": "book", "book": True, "depth_reached": 0, "nodes": 0, "seconds": 0.0,
+                                  "nps": 0, "value": 0, "forced": None, "plies": None, "move": text,
+                                  "score": None, "eval_steps": None, "depth_requested": self.depth}
+                return parse_move(text)
+        return super().get_move(board_state)
+
+    def close(self) -> None:
+        super().close()
+        self._pe = None

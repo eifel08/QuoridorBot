@@ -3,3 +3,4 @@ __pycache__/
 .venv/
 engine/build/
 *.parsed.png
+data/

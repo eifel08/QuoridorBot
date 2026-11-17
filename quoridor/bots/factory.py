@@ -39,7 +39,7 @@ IMove = tuple[str, int]
 
 @dataclass(frozen=True)
 class BotSpec:
-    kind: str = "ab"                   # "ab" (alpha-beta) or "ml"
+    kind: str = "ab"                   # "ab" (alpha-beta), "ml", or "profile" (model = profile name)
     depth: int = 4                     # alpha-beta search depth, 1..30
     time_limit: Optional[float] = None  # seconds per move (alpha-beta), None = no limit
     random_ties: bool = False          # alpha-beta: break ties between equal moves at random
@@ -64,6 +64,8 @@ class BotSpec:
         return self.kind == "ab" and cpp_engine.resolve_engine(self.engine) == "cpp"
 
     def label(self) -> str:
+        if self.kind == "profile":
+            return f"Profile {self.model}" + (f", {self.time_limit:g}s" if self.time_limit else "")
         if self.kind == "ml":
             return f"ML ({self.sims} sims)"
         t = f", {self.time_limit:g}s" if self.time_limit else ""
@@ -71,6 +73,8 @@ class BotSpec:
         return f"Alpha-beta d{self.depth}{t}{w}"
 
     def to_string(self) -> str:
+        if self.kind == "profile":
+            return f"profile:name={self.model}" + (f",time={self.time_limit:g}" if self.time_limit else "")
         if self.kind == "ml":
             return f"ml:model={self.model},sims={self.sims}"
         parts = [f"depth={self.depth}"]
@@ -89,8 +93,8 @@ def parse_bot_spec(text: str) -> BotSpec:
     text = text.strip()
     kind, _, rest = text.partition(":")
     kind = {"alphabeta": "ab", "alpha-beta": "ab"}.get(kind.lower(), kind.lower())
-    if kind not in ("ab", "ml"):
-        raise ValueError(f"unknown bot type '{kind}' (use 'ab' or 'ml')")
+    if kind not in ("ab", "ml", "profile"):
+        raise ValueError(f"unknown bot type '{kind}' (use 'ab', 'ml' or 'profile')")
     opts: dict[str, str] = {}
     for item in filter(None, (p.strip() for p in rest.split(","))):
         key, eq, value = item.partition("=")
@@ -105,7 +109,8 @@ def parse_bot_spec(text: str) -> BotSpec:
             opts["wall_filter"] = str(wall_filter_from_name(opts.pop("walls")))
         except ValueError as exc:
             raise ValueError(f"bad bot spec '{text}': {exc}") from None
-    allowed = {"ab": {"depth", "time", "random", "engine", *DEFAULT_OPTIONS}, "ml": {"model", "sims"}}[kind]
+    allowed = {"ab": {"depth", "time", "random", "engine", *DEFAULT_OPTIONS}, "ml": {"model", "sims"},
+               "profile": {"name", "time"}}[kind]
     unknown = set(opts) - allowed
     if unknown:
         raise ValueError(f"unknown option(s) for '{kind}': {', '.join(sorted(unknown))} "
@@ -124,6 +129,12 @@ def parse_bot_spec(text: str) -> BotSpec:
             if flags and engine == "py":
                 raise ValueError("engine flags need the C++ engine")
             return BotSpec("ab", depth=depth, time_limit=t, random_ties=rnd, engine=engine, options=flags)
+        if kind == "profile":
+            from .profiles import PROFILES
+
+            if opts.get("name") not in PROFILES:
+                raise ValueError(f"name must be one of: {', '.join(PROFILES)}")
+            return BotSpec("profile", model=opts["name"], time_limit=float(opts.get("time", 5)) or None)
         if "model" not in opts:
             raise ValueError("ml bots need model=PATH")
         return BotSpec("ml", model=opts["model"], sims=int(opts.get("sims", 64)))
@@ -134,6 +145,10 @@ def parse_bot_spec(text: str) -> BotSpec:
 def make_player(spec: BotSpec, name: Optional[str] = None) -> Player:
     """A :class:`Player` for the normal game engine (GUI / CLI)."""
     name = name or spec.label()
+    if spec.kind == "profile":
+        from .profiles import ProfileBot
+
+        return ProfileBot(name, spec.model, spec.time_limit)  # type: ignore[arg-type]
     if spec.kind == "ml":
         from ..ml.agent import MLPlayer
 
@@ -146,6 +161,21 @@ def make_player(spec: BotSpec, name: Optional[str] = None) -> Player:
 
 def make_policy(spec: BotSpec, seed: int = 0) -> Callable[[FastBoard], IMove]:
     """A fast ``FastBoard -> move`` function for headless batch matches."""
+    if spec.kind == "profile":
+        from .profiles import ProfileEngine, imove
+
+        pengines: dict[int, ProfileEngine] = {}
+
+        def ppolicy(board: FastBoard) -> IMove:
+            pe = pengines.get(os.getpid())
+            if pe is None:
+                pe = pengines[os.getpid()] = ProfileEngine(spec.model, seed=seed or 1)  # type: ignore[arg-type]
+            text, _ = pe.go(board, spec.time_limit or 5.0)
+            if text is None:
+                raise cpp_engine.EngineError("the engine found no legal move")
+            return imove(text)
+
+        return ppolicy
     if spec.kind == "ml":
         import numpy as np
 

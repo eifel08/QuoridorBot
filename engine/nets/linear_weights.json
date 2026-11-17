@@ -1,0 +1,42 @@
+{
+ "positions": 236791,
+ "games": 6000,
+ "K": 0.033,
+ "lambda": 0.5,
+ "classic": {
+  "val_logloss_target": 0.6017515874774028,
+  "val_logloss_result": 0.5839221816393656,
+  "val_sign_accuracy": 0.6904380116465525
+ },
+ "tuned": {
+  "val_logloss_target": 0.5878039951414804,
+  "val_logloss_result": 0.5622183095557505,
+  "val_sign_accuracy": 0.6987931471010211
+ },
+ "weights": {
+  "mg": {
+   "dist": 0,
+   "wall_full": 6,
+   "wall_low": 3,
+   "wall_def": 4,
+   "wall_tie": 0,
+   "wall_surplus": 4,
+   "tempo": 3,
+   "narrow": 1,
+   "paths": 1,
+   "dist_prod": 2
+  },
+  "eg": {
+   "dist": 15,
+   "wall_full": 30,
+   "wall_low": 0,
+   "wall_def": 2,
+   "wall_tie": 0,
+   "wall_surplus": 26,
+   "tempo": 4,
+   "narrow": -1,
+   "paths": 1,
+   "dist_prod": 1
+  }
+ }
+}

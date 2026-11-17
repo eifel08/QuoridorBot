@@ -1,0 +1,9 @@
+{
+ "h1": 64,
+ "h2": 16,
+ "K": 0.033,
+ "lambda": 0.5,
+ "val_target_logloss": 0.4398731589317322,
+ "train_positions": 360917,
+ "val_positions": 39733
+}

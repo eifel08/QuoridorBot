@@ -1,0 +1,6 @@
+180 games, 0 done, 180 to play, 4 workers
+[1/180 0.1 min, eta 21 min] turbo vs tuned op5: turbo (goal, 57 plies)
+[2/180 0.2 min, eta 13 min] turbo vs nnue op20: nnue (goal, 74 plies)
+[3/180 0.2 min, eta 10 min] nnue vs tuned op8: nnue (goal, 91 plies)
+[4/180 0.2 min, eta 8 min] tuned vs turbo op4: tuned (goal, 99 plies)
+[5/180 0.2 min, eta 8 min] nnue vs turbo op22: nnue (goal, 59 plies)

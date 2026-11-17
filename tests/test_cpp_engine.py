@@ -47,7 +47,7 @@ class EngineCase(unittest.TestCase):
     def setUp(self):
         for name, value in {"futility": 1, "wall_filter": 1, "decided": 1, "tt": 1, "tt_exact_depth": 0,
                             "alphabeta": 1, "seed": 0, "wall_cap": 1, "smart_walls": 1, "lock_decided": 1,
-                            "def_global": 1}.items():
+                            "def_global": 1, "wall_zone": 4, "qsearch": 1}.items():
             self.engine.set_option(name, value)
 
 
@@ -134,9 +134,13 @@ class TestWallFilter(EngineCase):
             self.assertLessEqual(pawn, set(filtered), pos)
             self.engine.set_option("wall_filter", 2)  # attack walls only: a subset
             self.assertLessEqual(set(self.engine.search_order()), set(filtered), pos)
-            self.engine.set_option("wall_filter", 0)  # off: every legal move
+            self.engine.set_option("wall_filter", 0)  # off: every legal move that can matter
             self.engine.set_position(pos)
-            self.assertEqual(set(self.engine.search_order()), legal, pos)
+            every = set(self.engine.search_order())
+            self.assertLessEqual(every, legal, pos)
+            for m in legal - every:  # only walls off every route (or in dead regions) are left out
+                self.assertIsInstance(m, WallMove, pos)
+                self.assertIn(self.engine.command(f"wallclass {format_move(m)}").split()[1], ("dead", "off"), pos)
 
     def test_walls_are_ordered_attack_defense_other(self):
         rng = random.Random(8)
@@ -152,6 +156,43 @@ class TestWallFilter(EngineCase):
             rank = [0 if m in attack else 1 if m in both else 2 for m in every]
             self.assertEqual(rank, sorted(rank), pos)  # all-walls mode: attack, then defense, then the rest
             self.assertEqual([m for m in tiers[1] if m in attack], tiers[2], pos)  # same order inside a tier
+
+    def test_walls_in_dead_regions_are_never_generated(self):
+        # A sealed 2x2 pocket in the top-left corner (v01 + h10 close it off): no pawn can
+        # ever get there, so a wall inside it changes nothing for the rest of the game.
+        pos = "position 0 8 4 0 4 10 10 v01 h10"
+        self.engine.set_position(pos)
+        self.assertEqual(self.engine.command("wallclass v00"), "wallclass dead 0 0")
+        for value in (0, 1):
+            self.engine.set_option("wall_filter", value)
+            self.engine.set_position(pos)
+            self.assertNotIn(WallMove(0, 0, V), set(self.engine.search_order()))
+        self.engine.set_option("wall_zone", -1)  # zone off: still no dead walls
+        self.engine.set_position(pos)
+        self.assertNotIn(WallMove(0, 0, V), set(self.engine.search_order()))
+
+    def test_walls_behind_both_pawns_are_pruned(self):
+        # Both pawns two steps from their goals on column 4: rows 3-5 at the edge are
+        # behind both of them, off every route at most wall_zone steps longer than a
+        # shortest one.
+        pos = "position 0 2 4 6 4 10 10"
+        self.engine.set_option("wall_filter", 0)
+        self.engine.set_position(pos)
+        walls = {m for m in self.engine.search_order() if isinstance(m, WallMove)}
+        self.assertEqual(self.engine.command("wallclass h40"), "wallclass off 0 0")
+        self.assertNotIn(WallMove(4, 0, H), walls)
+        self.assertNotIn(WallMove(3, 0, V), walls)
+        self.assertIn(WallMove(1, 4, H), walls)  # on Red's path: kept
+        self.assertIn(WallMove(6, 4, H), walls)  # on Blue's path: kept
+
+    def test_no_defense_walls_against_an_opponent_without_walls(self):
+        pos = "position 0 6 4 2 4 5 0"
+        self.engine.set_position(pos)
+        walls = {m for m in self.engine.search_order() if isinstance(m, WallMove)}
+        self.engine.set_option("wall_filter", 2)
+        self.engine.set_position(pos)
+        attack = {m for m in self.engine.search_order() if isinstance(m, WallMove)}
+        self.assertEqual(walls, attack)  # nothing to defend against: attack walls only
 
     def test_opening_filter(self):
         self.engine.set_position(Board().snapshot(0))
@@ -209,11 +250,12 @@ class TestSearch(EngineCase):
 
     def test_surplus_walls_are_capped(self):
         # Red: 4 steps, 6 walls; Blue: 2 steps, no walls; Red to move. Red only has about
-        # 2 + 1 turns left to place walls, so only 3 of its 6 walls count.
+        # 2 + 1 turns left to place walls, so only 3 of its 6 walls count in full; the other
+        # 3 are kept for later and count wall_surplus (1) each.
         pos = "position 0 4 0 6 4 6 0"
         self.engine.set_option("smart_walls", 0)  # the plain reserve count (blockability: see below)
         self.engine.set_position(pos)
-        self.assertEqual(self.engine.evaluate(), (2 - 4) * 10 + 3 * 16 + 5)
+        self.assertEqual(self.engine.evaluate(), (2 - 4) * 10 + 3 * 16 + 3 * 1 + 5)
         self.engine.set_option("wall_cap", 0)
         self.engine.set_position(pos)
         self.assertEqual(self.engine.evaluate(), (2 - 4) * 10 + 6 * 16 + 5)
@@ -229,8 +271,9 @@ class TestSearch(EngineCase):
     def test_unblockable_corridor_makes_walls_worthless(self):
         self.engine.set_position(self.CORRIDOR)
         self.assertEqual(self.engine.command("block"), "block p0 open gains 1+rich p1 locked gains none")
-        # Only a tie-breaker per wall that could still be placed (Blue's 3 steps + 1).
-        self.assertEqual(self.engine.evaluate(), (3 - 4) * 10 + 4 * 1 + 5)
+        # Only a tie-breaker per wall that could still be placed (Blue's 3 steps + 1), and
+        # the surplus value for the other 6.
+        self.assertEqual(self.engine.evaluate(), (3 - 4) * 10 + 4 * 1 + 6 * 1 + 5)
         self.engine.set_option("smart_walls", 0)
         self.engine.set_position(self.CORRIDOR)
         self.assertGreater(self.engine.evaluate(), 50)  # the flat reserve count: "Red is winning"
@@ -254,6 +297,20 @@ class TestSearch(EngineCase):
         self.engine.set_option("smart_walls", 0)
         self.engine.set_position(pos)
         self.assertEqual(ev, self.engine.evaluate())
+
+    # Blue (to move) races Red: 4 steps for Red, 7 for Blue. Blue's only chance is the
+    # bottleneck of Red's path, and Red can seal it next move (its reply wall leaves its
+    # path locked). Blue must block now, not step forward and "keep the wall for later".
+    USE_IT_OR_LOSE_IT = "position 1 3 7 3 6 4 2 h06 h10 h12 h21 h23 h25 h31 h33 h35 h40 h57 v16 v20 v27"
+
+    def test_fragile_block_is_used_at_once(self):
+        self.engine.set_position(self.USE_IT_OR_LOSE_IT)
+        move, _ = self.engine.go(depth=1)
+        self.assertEqual(move, WallMove(4, 7, H))
+        self.engine.set_option("qsearch", 0)  # without the leaf quiescence depth 1 hoards
+        self.engine.set_position(self.USE_IT_OR_LOSE_IT)
+        move, _ = self.engine.go(depth=1)
+        self.assertIsInstance(move, PawnMove)
 
     def test_global_defense_walls_are_searched(self):
         # Every wall the filter generates is legal, with or without the global defense.

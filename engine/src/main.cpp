@@ -13,6 +13,8 @@
 //   eval                          -> eval <static evaluation for the side to move>
 //   block                         -> block <per player: locked, greedy block gains, rich flag>
 //   hash                          -> hash <zobrist key>
+//   wallclass <wall>              -> wallclass <dead|off|route> <steps added to p0> <steps added to p1>
+//                                    (dead: no pawn can reach it; off: outside every route zone)
 //   set <option> <value>          -> ok        (see README.md for the options)
 //   newgame                       -> ok        (clears the transposition table)
 //   selftest [games] [seed]       -> ok ...    (internal consistency checks)
@@ -104,6 +106,10 @@ bool set_option(Search& s, const std::string& name, const std::string& value, st
     else if (name == "wall_chain") c.wall_chain = int(std::clamp(v, 1L, 4L));
     else if (name == "wall_def") c.wall_def = int(v);
     else if (name == "smart_dist") c.smart_dist = int(v);
+    else if (name == "wall_surplus") c.wall_surplus = int(v);
+    else if (name == "def_funnel_depth") c.def_funnel_depth = int(v);
+    else if (name == "wall_zone") c.wall_zone = int(std::clamp(v, -1L, long(NSQ)));
+    else if (name == "qsearch") c.qsearch = v != 0;
     else if (name == "lock_decided") c.lock_decided = v != 0;
     else if (name == "def_global") c.def_global = v != 0;
     else if (name == "def_funnel") c.def_funnel = v != 0;
@@ -269,6 +275,31 @@ int main() {
                     out += " " + std::to_string(pi.gain[i]) + (pi.rich[i] ? "+rich" : "");
                 if (pi.nsteps == 0) out += " none";
                 if (pi.trunc) out += " ...";
+            }
+        } else if (cmd == "wallclass") {
+            std::string tok;
+            in >> tok;
+            const Move m = parse_move(tok);
+            const Board& b = search.board;
+            if (m == MOVE_NONE || is_pawn(m) || !b.is_legal(m)) {
+                out = "error illegal wall '" + tok + "'";
+            } else {
+                const int slack = search.cfg.wall_zone >= 0 ? search.cfg.wall_zone : 4;
+                BB reach{0, 0}, zone{0, 0};
+                for (int p = 0; p < 2; ++p) {
+                    GoalLayers gl;
+                    b.goal_layers(p, gl);
+                    reach |= route_zone(b.open, b.pawn[p], gl, NSQ);
+                    zone |= route_zone(b.open, b.pawn[p], gl, slack);
+                }
+                uint64_t rh, rv, zh, zv;
+                zone_slots(reach, rh, rv);
+                zone_slots(zone, zh, zv);
+                const bool h = is_hwall(m);
+                const int a = h ? m - H_BASE : m - V_BASE;
+                const char* cls = !(((h ? rh : rv) >> a) & 1) ? "dead" : !(((h ? zh : zv) >> a) & 1) ? "off" : "route";
+                out = std::string("wallclass ") + cls;
+                for (int p = 0; p < 2; ++p) out += " " + std::to_string(b.distance_with_wall(p, m) - b.distance(p));
             }
         } else if (cmd == "hash") {
             out = "hash " + std::to_string(search.board.hash);

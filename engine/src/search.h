@@ -38,6 +38,9 @@ struct Config {
     int wall_chain = 3;    // greedy blocks simulated when the path is only barely blockable
     int wall_def = 6;      // a wall kept back to defend while the opponent can still block me
     int smart_dist = 6;    // analyse only paths at most this long (longer ones count as richly blockable)
+    // Walls beyond the cap are not worthless: they are kept for later in the game. Each
+    // counts this much, so spending one on a wall that changes nothing is never free.
+    int wall_surplus = 1;
     bool lock_decided = true;  // race cutoffs also when the opponent's walls provably cannot touch my path
 
     // ---- search features ----
@@ -51,7 +54,17 @@ struct Config {
     bool def_global = true;   // walls that make an attacking wall illegal (path-existence rule)
     bool def_funnel = true;   // walls extending such a barrier (one follow-up wall from sealing it)
     int def_threats = 2;      // strongest opponent walls against me that are analysed
-    int def_min_depth = 2;    // remaining depth needed for global defense (funnel: one more)
+    int def_min_depth = 1;    // remaining depth needed for global defense
+    int def_funnel_depth = 3; // remaining depth needed for funnelling walls
+    // Wall relevance: walls that are neither attack walls nor global defense must block an
+    // edge on a route at most this many steps longer than some player's shortest path.
+    // -1: only prune walls in dead regions (squares neither pawn can reach any more).
+    int wall_zone = 4;
+    // Leaf quiescence ("use it or lose it"): when the opponent's block against the side
+    // to move is fragile (barely blockable path), the side to move first gets to try the
+    // replies that kill it: walls that make the blocking walls illegal or pre-empt them,
+    // and pawn steps into a corridor no wall can lengthen any more.
+    bool qsearch = true;
     bool decided = true;          // Step 5: exact race cutoffs
     int decided_margin = 1;       // extra steps required when the pawns can still meet
     bool futility = true;         // Step 6
@@ -120,11 +133,16 @@ private:
         PathInfo info;
         uint8_t pad[4];
     };
-    struct DefEntry {  // global-defense masks of a position (interior nodes recur every iteration)
-        uint64_t key;
-        uint64_t def[2], fun[2];
-        uint8_t funnel;  // the funnel masks were computed too
-        uint8_t pad[7];
+    // Defensive analysis of a position for the side to move (cached: interior nodes recur
+    // every iteration). thr: the opponent's single-wall threats (legal for them, lengthen my
+    // path); def: global defense (walls making a top threat illegal); fun: funnelling walls.
+    struct DefInfo {
+        uint64_t thr[2] = {0, 0}, def[2] = {0, 0}, fun[2] = {0, 0};
+        uint8_t level = 0;  // 0 = threats only, 1 = + global defense, 2 = + funnel
+    };
+    struct DefEntry {
+        uint64_t key = 0;
+        DefInfo info;
     };
     mutable std::vector<DefEntry> dcache_;
     mutable std::vector<EvalEntry> ecache_;  // allocated once; no allocation during the search
@@ -148,8 +166,11 @@ private:
     int decided_score(int me, int d_me, int d_opp, int ply) const;
     bool can_interact(int winner, int d_winner) const;
     int gen_walls(int me, int d_me, int d_opp, const GoalLayers& gl_me, int filter, int depth, Cand* out) const;
-    void global_defense(int me, int d_me, const PathCut& cut_me, const PathCut& cut_opp, uint64_t free_h,
-                        uint64_t free_v, bool funnel, uint64_t (&def)[2], uint64_t (&fun)[2]) const;
+    void defense(int me, int d_me, const PathCut& cut_me, const PathCut& cut_opp, uint64_t free_h, uint64_t free_v,
+                 int level, DefInfo& out) const;
+    void global_defense(const Move* threat, int nt, uint64_t free_h, uint64_t free_v, bool funnel, DefInfo& di) const;
+    int quiesce(int alpha, int beta, int ply, int d_me, int d_opp);
+    int leaf_value(int ply, int d_me, int d_opp) const;  // decided score or static eval, side to move
     TTEntry* tt_probe(uint64_t key);
     void tt_store(uint64_t key, int depth, int value, int flag, Move move);
 };

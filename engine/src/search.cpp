@@ -267,6 +267,10 @@ int Search::evaluate(int me, int d_me, int d_opp) const {
         my_walls += my_def * cfg.wall_def + (my_rest - my_def) * cfg.wall_tie;
         opp_walls += opp_def * cfg.wall_def + (opp_rest - opp_def) * cfg.wall_tie;
     }
+    // Walls above the cap are kept for later: a small value each, so that a wall
+    // which changes nothing always costs something.
+    my_walls += (board.walls_left[me] - my_eff) * cfg.wall_surplus;
+    opp_walls += (board.walls_left[opp] - opp_eff) * cfg.wall_surplus;
     return (d_opp - d_me) * cfg.dist_weight + (my_walls - opp_walls) + cfg.tempo_bonus;
 }
 
@@ -320,17 +324,29 @@ bool Search::can_interact(int winner, int d_winner) const {
 // player's shortest paths, so the BFS is skipped for every other wall (and
 // the player's distance is then known to be unchanged).
 // --------------------------------------------------------------------------
-// Global (topological) defense. For the opponent's strongest walls against
-// me (W_atk: legal now, lengthens my path most), find every wall W_def that
-// makes W_atk ILLEGAL: with both on the board some player has no path left.
-// Only walls cutting a shortest path of that player in board + W_atk can
-// disconnect it, so those are the only ones tested (one early-exit BFS each).
-// With `funnel`, also the walls one step short of that: free slots touching
-// W_atk or a W_def AND touching a placed wall or the board edge, i.e. that
-// extend a barrier which one follow-up wall would close.
-void Search::global_defense(int me, int d_me, const PathCut& cut_me, const PathCut& cut_opp, uint64_t free_h,
-                            uint64_t free_v, bool funnel, uint64_t (&def)[2], uint64_t (&fun)[2]) const {
+// Threat scan. A threat is a wall the opponent could place now (legal for
+// them) that lengthens my shortest path. Only walls cutting an edge of one of my
+// shortest paths can do that, so only those are tested (one BFS each).
+//
+// Global (topological) defense. For the opponent's strongest threats W_atk,
+// find every wall W_def that makes W_atk ILLEGAL: with both on the board some
+// player has no path left. Only walls cutting a shortest path of that player
+// in board + W_atk can disconnect it, so those are the only ones tested (one
+// early-exit BFS each). With `funnel`, also the walls one step short of that:
+// free slots touching W_atk or a W_def AND touching a placed wall or the board
+// edge, i.e. that extend a barrier which one follow-up wall would close.
+//
+// This is also the opponent's "counter-block" toolbox seen from their side: the
+// same function run for them finds the walls that seal off MY blocking walls.
+void Search::defense(int me, int d_me, const PathCut& cut_me, const PathCut& cut_opp, uint64_t free_h,
+                     uint64_t free_v, int level, DefInfo& out) const {
+    DefEntry& e = dcache_[board.hash & (dcache_.size() - 1)];
+    if (e.key == board.hash && e.info.level >= level) {
+        out = e.info;
+        return;
+    }
     const int opp = me ^ 1;
+    DefInfo di;
     constexpr int MAXT = 4;
     Move threat[MAXT];
     int loss[MAXT], nt = 0;
@@ -346,6 +362,7 @@ void Search::global_defense(int me, int d_me, const PathCut& cut_me, const PathC
             if (nd <= d_me) continue;  // not a threat (or illegal: it would cut me off)
             if (((theirs >> a) & 1) && may_disconnect(now, m) && board.distance_with_wall(opp, m) < 0)
                 continue;  // illegal for them
+            di.thr[o] |= 1ULL << a;
             const int l = nd - d_me;
             int k = nt < want ? nt++ : want;
             if (k == want && l <= loss[want - 1]) continue;
@@ -359,8 +376,17 @@ void Search::global_defense(int me, int d_me, const PathCut& cut_me, const PathC
             loss[k] = l;
         }
     }
-    if (nt == 0) return;
+    if (level >= 1 && nt > 0) global_defense(threat, nt, free_h, free_v, level >= 2, di);
+    di.level = uint8_t(level);
+    e.key = board.hash;
+    e.info = di;
+    out = di;
+}
 
+void Search::global_defense(const Move* threat, int nt, uint64_t free_h, uint64_t free_v, bool funnel,
+                            DefInfo& di) const {
+    uint64_t (&def)[2] = di.def;
+    uint64_t (&fun)[2] = di.fun;
     // Slots that already lean on something: a placed wall or the board edge.
     uint64_t anchored[2] = {COL0 | COL7, 0xFFULL | (0xFFULL << 56)};
     if (funnel) {
@@ -413,51 +439,63 @@ void Search::global_defense(int me, int d_me, const PathCut& cut_me, const PathC
     fun[1] &= ~def[1];
 }
 
+namespace {
+// Local defense: the free slots that overlap or cross one of the given walls,
+// so that wall can no longer be placed.
+inline void preempt_slots(const uint64_t (&w)[2], uint64_t free_h, uint64_t free_v, uint64_t& h, uint64_t& v) {
+    const uint64_t th = w[0], tv = w[1];
+    h = (((th & ~COL7) << 1) | ((th & ~COL0) >> 1) | tv) & free_h;
+    v = ((tv << NW) | (tv >> NW) | th) & free_v;
+}
+}  // namespace
+
 int Search::gen_walls(int me, int d_me, int d_opp, const GoalLayers& gl_me, int filter, int depth, Cand* out) const {
     const int opp = me ^ 1;
     GoalLayers gl_opp;
-    board.goal_layers(opp, gl_opp, board.pawn[opp]);
+    board.goal_layers(opp, gl_opp);  // full flood: also gives the opponent's route zone
     const PathCut cut_opp = board.shortest_path_cuts(opp, gl_opp);
     const PathCut cut_me = board.shortest_path_cuts(me, gl_me);
     const uint64_t free_h = board.free_h(), free_v = board.free_v();
 
     // Attack: walls that block an edge on any of the opponent's shortest paths.
     const uint64_t att_h = cut_opp.h & free_h, att_v = cut_opp.v & free_v;
-    // Local defense: walls that overlap or cross a wall the opponent could use
-    // to block an edge on any of my shortest paths.
-    const uint64_t th = cut_me.h & free_h, tv = cut_me.v & free_v;
-    uint64_t def_h = (((th & ~COL7) << 1) | ((th & ~COL0) >> 1) | tv) & free_h;
-    uint64_t def_v = ((tv << NW) | (tv >> NW) | th) & free_v;
-    // Global defense (path-existence) and funnelling walls; see global_defense().
-    uint64_t gdef[2] = {0, 0}, fun[2] = {0, 0};
-    // Filter 1: extra candidates. Filter 0 (all walls): only their place in the move order.
-    if (filter != FILTER_ATTACK_ONLY && cfg.def_global && board.walls_left[opp] > 0 && depth >= cfg.def_min_depth) {
-        const bool funnel = cfg.def_funnel && depth > cfg.def_min_depth;
-        DefEntry& e = dcache_[board.hash & (dcache_.size() - 1)];
-        if (e.key == board.hash && (e.funnel || !funnel)) {
-            gdef[0] = e.def[0];
-            gdef[1] = e.def[1];
-            if (funnel) {
-                fun[0] = e.fun[0];
-                fun[1] = e.fun[1];
-            }
-        } else {
-            global_defense(me, d_me, cut_me, cut_opp, free_h, free_v, funnel, gdef, fun);
-            e = DefEntry{board.hash, {gdef[0], gdef[1]}, {fun[0], fun[1]}, uint8_t(funnel), {}};
-        }
+    // Defense is only needed against an opponent who still has walls, and only
+    // against walls that would really lengthen my path (threats): pre-empting a
+    // wall that merely cuts one of several equally short routes achieves nothing.
+    DefInfo di;
+    if (filter != FILTER_ATTACK_ONLY && board.walls_left[opp] > 0) {
+        int level = 0;
+        if (cfg.def_global && depth >= cfg.def_min_depth)
+            level = cfg.def_funnel && depth >= std::max(cfg.def_funnel_depth, cfg.def_min_depth + 1) ? 2 : 1;
+        defense(me, d_me, cut_me, cut_opp, free_h, free_v, level, di);
     }
+    // Local defense: overlap or cross a threat. Global defense: make one illegal.
+    uint64_t def_h, def_v;
+    preempt_slots(di.thr, free_h, free_v, def_h, def_v);
+    const uint64_t* gdef = di.def;
     def_h |= gdef[0];
     def_v |= gdef[1];
-    fun[0] &= ~(def_h | att_h);
-    fun[1] &= ~(def_v | att_v);
+    uint64_t fun[2] = {di.fun[0] & ~(def_h | att_h), di.fun[1] & ~(def_v | att_v)};
 
     uint64_t cand_h = free_h, cand_v = free_v;
     if (filter == FILTER_ATTACK_ONLY) {
         cand_h = att_h;
         cand_v = att_v;
-    } else if (filter == FILTER_ATTACK_DEFENSE) {
-        cand_h = att_h | def_h | fun[0];
-        cand_v = att_v | def_v | fun[1];
+    } else {
+        if (filter == FILTER_ATTACK_DEFENSE) {
+            cand_h = att_h | def_h | fun[0];
+            cand_v = att_v | def_v | fun[1];
+        }
+        // Relevance: everything except attack walls and global defense must touch a
+        // route some player may still take. Walls behind both pawns or in sealed-off
+        // regions change no distance and no legality, now or later.
+        const int slack = cfg.wall_zone >= 0 ? cfg.wall_zone : NSQ;
+        const BB zone = route_zone(board.open, board.pawn[me], gl_me, slack) |
+                        route_zone(board.open, board.pawn[opp], gl_opp, slack);
+        uint64_t zh, zv;
+        zone_slots(zone, zh, zv);
+        cand_h &= zh | att_h | gdef[0];
+        cand_v &= zv | att_v | gdef[1];
     }
 
     int n = 0;
@@ -490,6 +528,109 @@ int Search::gen_walls(int me, int d_me, int d_opp, const GoalLayers& gl_me, int 
 }
 
 // --------------------------------------------------------------------------
+// Leaf quiescence ("use it or lose it").
+//
+// The static evaluation credits a player's walls with the blocks they can make
+// against the other path. That credit is only safe for the side to move: the
+// other side's block can still be destroyed before it is played, by a wall that
+// makes the blocking walls illegal (path-existence rule) or occupies their slot,
+// or by a pawn step into a corridor no wall can lengthen. A leaf scored
+// statically therefore misses exactly the counter-block that punishes hoarding.
+//
+// So when the opponent's attack on the side to move is FRAGILE (the path is
+// barely blockable: one or two bottlenecks, not richly blockable, not locked),
+// the side to move may stand pat or play one of those killing replies, each
+// scored statically. One ply, gated, no recursion: bounded cost.
+// --------------------------------------------------------------------------
+int Search::leaf_value(int ply, int d_me, int d_opp) const {
+    const int me = board.turn;
+    if (cfg.decided) {
+        const int v = decided_score(me, d_me, d_opp, ply);
+        if (v != INF) return v;
+    }
+    return evaluate(me, d_me, d_opp);
+}
+
+int Search::quiesce(int alpha, int beta, int ply, int d_me, int d_opp) {
+    const int me = board.turn, opp = me ^ 1;
+    const int stand = evaluate(me, d_me, d_opp);
+    if (!cfg.qsearch || !cfg.smart_walls || ply >= MAX_PLY - 2 || board.walls_left[opp] == 0 ||
+        d_me > cfg.smart_dist || (cfg.alphabeta && stand >= beta))
+        return stand;
+    const PathInfo pi = path_info(me, d_me);
+    if (pi.locked || pi.nsteps == 0 || pi.rich[0]) return stand;  // nothing fragile to kill
+
+    int best = stand;
+    if (best > alpha) alpha = best;
+    // Scores one reply statically; true = beta cutoff.
+    auto reply = [&](Move m, int nd_me, int nd_opp) -> bool {
+        ++nodes_;
+        int v;
+        if (is_pawn(m) && nd_me == 0) {
+            v = WIN - (ply + 1);
+        } else {
+            const int prev = board.make(m);
+            v = -leaf_value(ply + 1, nd_opp, nd_me);
+            board.unmake(m, prev);
+        }
+        if (v > best) best = v;
+        if (v > alpha) alpha = v;
+        return cfg.alphabeta && alpha >= beta;
+    };
+
+    GoalLayers gl_me;
+    board.goal_layers(me, gl_me);
+    // 1. Slip: a step along my shortest path after which no wall can lengthen it.
+    Move pm[8];
+    const int npawn = board.pawn_moves(me, pm);
+    for (int i = 0; i < npawn; ++i) {
+        const int nd = gl_me.dist(pm[i]);
+        if (nd < 0 || nd >= d_me) continue;
+        if (nd == 0) {
+            if (reply(pm[i], 0, d_opp)) return best;
+            continue;
+        }
+        const int prev = board.make(pm[i]);
+        const PathInfo after = path_info(me, nd);
+        board.unmake(pm[i], prev);
+        if ((after.locked || after.nsteps == 0) && reply(pm[i], nd, d_opp)) return best;
+    }
+    // 2. Seal: a wall that makes the opponent's blocking walls illegal or takes their slot.
+    if (board.walls_left[me] > 0) {
+        GoalLayers gl_opp;
+        board.goal_layers(opp, gl_opp, board.pawn[opp]);
+        const PathCut cut_opp = board.shortest_path_cuts(opp, gl_opp);
+        const PathCut cut_me = board.shortest_path_cuts(me, gl_me);
+        const uint64_t free_h = board.free_h(), free_v = board.free_v();
+        DefInfo di;
+        defense(me, d_me, cut_me, cut_opp, free_h, free_v, cfg.def_global ? 1 : 0, di);
+        uint64_t seal[2];
+        preempt_slots(di.thr, free_h, free_v, seal[0], seal[1]);
+        seal[0] |= di.def[0];
+        seal[1] |= di.def[1];
+        for (int o = 0; o < 2; ++o) {
+            const uint64_t hits_opp = o == 0 ? cut_opp.h : cut_opp.v;
+            const uint64_t hits_me = o == 0 ? cut_me.h : cut_me.v;
+            for (uint64_t b = seal[o]; b; b &= b - 1) {
+                const int a = std::countr_zero(b);
+                const Move m = o == 0 ? hwall_move(a) : vwall_move(a);
+                int nd_opp = d_opp, nd_me = d_me;
+                if ((hits_opp >> a) & 1) {
+                    nd_opp = board.distance_with_wall(opp, m);
+                    if (nd_opp < 0) continue;
+                }
+                if ((hits_me >> a) & 1) {
+                    nd_me = board.distance_with_wall(me, m);
+                    if (nd_me < 0) continue;
+                }
+                if (reply(m, nd_me, nd_opp)) return best;
+            }
+        }
+    }
+    return best;
+}
+
+// --------------------------------------------------------------------------
 // Negamax
 // --------------------------------------------------------------------------
 int Search::negamax(int depth, int alpha, int beta, int ply, int d_me, int d_opp) {
@@ -504,7 +645,8 @@ int Search::negamax(int depth, int alpha, int beta, int ply, int d_me, int d_opp
         const int v = decided_score(me, d_me, d_opp, ply);
         if (v != INF) return v;
     }
-    if (depth <= 0 || ply >= MAX_PLY - 1) return evaluate(me, d_me, d_opp);
+    if (ply >= MAX_PLY - 1) return evaluate(me, d_me, d_opp);
+    if (depth <= 0) return quiesce(alpha, beta, ply, d_me, d_opp);
 
     // ---- transposition table ----
     Move tt_move = root ? root_hint_ : MOVE_NONE;

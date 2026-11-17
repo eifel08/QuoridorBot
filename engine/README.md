@@ -117,9 +117,11 @@ The cost is one pipe round trip per move (well under a millisecond), irrelevant 
 Pawn moves are always generated. Walls are limited to:
 
 * **attack walls**: block an edge on any shortest path of the opponent;
-* **defense walls**, three kinds (see [Defensive walls](#defensive-walls-def_global-def_funnel)):
-  * *local*: overlap or cross a wall the opponent could place to block an edge on any of *my*
-    shortest paths (they pre-empt that wall by taking its slot);
+* **defense walls**, three kinds (see [Defensive walls](#defensive-walls-def_global-def_funnel)),
+  only while the opponent still has walls:
+  * *local*: overlap or cross a **threat**, a wall the opponent could legally place now that
+    lengthens my shortest path (they pre-empt that wall by taking its slot). A wall that merely
+    cuts one of several equally short routes is not a threat, and pre-empting it achieves nothing;
   * *global*: anywhere on the board, make one of the opponent's strongest attacking walls
     **illegal** under the path-existence rule;
   * *funnelling*: extend a barrier that one more wall would close in that way.
@@ -127,6 +129,16 @@ Pawn moves are always generated. Walls are limited to:
 Instead of two full BFS runs per player the engine floods once from the goal row and then walks
 from the pawn through decreasing distance layers; this visits exactly the edges `u->v` with
 `dist_from_pawn[u] + 1 + dist_to_goal[v] == shortest_distance`.
+
+**Relevance (`wall_zone`, every filter mode).** Apart from attack walls and global-defense walls,
+a wall is only generated if it blocks an edge on a *route zone*: the squares that lie on some
+route of either player at most `wall_zone` (4) steps longer than its shortest path
+(`dist_from_pawn + dist_to_goal <= D + wall_zone`). Walls behind both pawns, or inside a region
+that no pawn can reach any more, change no distance and no legality and are never searched.
+`wall_zone=-1` keeps every wall a pawn can still reach (only provably dead regions are pruned:
+walls are only ever added, so an unreachable square stays unreachable). `wallclass <wall>` in the
+protocol shows how a wall is classified. "All walls" mode (`wall_filter=0`) is therefore every
+legal wall *that can matter*.
 
 If the filter leaves a player without any move, all legal walls are generated.
 
@@ -164,6 +176,10 @@ path**, i.e. of what A's walls can still do to B:
    | chain block of exactly +1 step (or a soft layer, which takes two walls) | `wall_low` = 10 |
    | wall beyond the chain (path unblockable after it), or path unblockable / locked | `wall_tie` = 1 |
    | such a "useless" wall while the opponent can still block *me* | `wall_def` = 6, at most one per opponent wall that can hurt me (kept back for defense) |
+
+Walls above the cap (`w - w_eff`) are kept for later in the game and count `wall_surplus` = 1
+each. Without it a surplus wall was worth exactly 0, so spending one on a wall that changes
+nothing (a "pass" in a dead corner) cost nothing in the evaluation.
 
 So with an unblockable shortest path the opponent's reserve drops from 16 per wall to 1 per wall
 (a pure tie-breaker), and a path that one wall can lengthen by one step before it becomes
@@ -218,8 +234,35 @@ With `wall_filter=1` a wall is **defensive** if it pre-empts one of the opponent
    close, so the opponent's attack would become illegal one move later (or a wall the opponent
    places to stop that helps seal the other side). Ordered after the other defense walls.
 
-Global defense is computed at nodes with at least `def_min_depth` (2) plies left, funnelling with
-one more, so the nodes next to the leaves stay cheap.
+Global defense is computed at nodes with at least `def_min_depth` (1) ply left, funnelling with
+`def_funnel_depth` (3). Threats, global defense and funnel masks are cached per position.
+
+(`def_min_depth` used to be 2. Then a node with one ply left never considered the opponent's
+sealing walls: at search depth 2 the bot saw "I can block next turn" but not "the opponent's next
+wall makes that block illegal", and the result flipped between odd and even depths.)
+
+### Leaf quiescence: use it or lose it (`qsearch`)
+
+The static evaluation credits a player's walls with the blocks they can still make. That is only
+safe for the **side to move**: the other side's block can be destroyed before it is ever played,
+by
+
+* a wall that makes the blocking walls **illegal** (global defense: with it on the board, the
+  block would cut someone off), or that takes their slot (local defense), or
+* a pawn step into a corridor that no wall can lengthen any more (the path becomes locked or
+  unblockable).
+
+A leaf scored statically misses exactly this counter-block, so the bot kept its walls "for later"
+and the opponent sealed the opportunity on its next move. Now, at every leaf where the opponent's
+attack on the side to move is **fragile** (the path is barely blockable: one or two bottlenecks,
+not rich, not locked), the side to move may stand pat or play one of those killing replies, each
+scored statically (or as a decided race). It is one ply with no recursion, gated on the
+fragility test and cached analysis, so it costs little. The effect: when the bot's block is
+fragile, a pawn move is scored as "the opponent seals next", so the bot blocks **now**.
+
+Example (`tests/test_cpp_engine.py`, `USE_IT_OR_LOSE_IT`): the old engine played a pawn step at
+depths 1-2 and found the urgent block `h47` only from depth 3 (forced loss proven at depth 5).
+With quiescence it blocks at depth 1 and proves the result at depth 3.
 
 ### Futility pruning (`futility`)
 
@@ -245,6 +288,7 @@ Set with `set <name> <value>` in the protocol, `CppBot(options={...})`, bot spec
 | `wall_cap_slack` | 1 | extra turns allowed by the cap |
 | `smart_walls` | 1 | evaluation: blockability-aware wall value (0 = flat reserve count) |
 | `smart_dist` | 6 | analyse paths of at most this many steps (longer ones count as richly blockable) |
+| `wall_surplus` | 1 | value of each wall above the cap (kept for later) |
 | `wall_rich` | 3 | blocking layers from which walls keep the full `wall_weight` |
 | `wall_chain` | 3 | greedy blocks simulated for a barely blockable path (1-4) |
 | `wall_low` | 10 | value of a wall that can only add one step |
@@ -255,7 +299,10 @@ Set with `set <name> <value>` in the protocol, `CppBot(options={...})`, bot spec
 | `def_global` | 1 | defense walls also include walls making an attacking wall illegal |
 | `def_funnel` | 1 | ... and walls one step short of that (funnelling) |
 | `def_threats` | 2 | opponent attacking walls analysed for global defense (1-4) |
-| `def_min_depth` | 2 | remaining depth needed for global defense (funnelling: one more) |
+| `def_min_depth` | 1 | remaining depth needed for global defense |
+| `def_funnel_depth` | 3 | remaining depth needed for funnelling walls |
+| `wall_zone` | 4 | relevance: non-attack, non-global-defense walls must touch a route at most this many steps longer than a shortest path (-1: prune only dead regions) |
+| `qsearch` | 1 | leaf quiescence: the side to move may kill a fragile block first (seal wall or corridor step) |
 | `decided` | 1 | decided-position cutoffs |
 | `decided_margin` | 1 | extra lead required when the pawns can still meet |
 | `futility` | 1 | futility pruning |
@@ -281,6 +328,7 @@ go [depth N] [time SECONDS]   -> bestmove m74 depth 9 score 21 nodes 1234567 tim
 moves                         -> every legal move (never filtered)
 genmoves                      -> the moves the search tries, in order (filter applied)
 play <move> | dist | eval | block | hash | set <name> <value> | newgame | selftest [games] [seed] | quit
+wallclass <wall>              -> wallclass dead|off|route <steps added to p0> <steps added to p1>
 ```
 
 `block` prints the blockability of both players' paths, e.g.

@@ -118,6 +118,16 @@ uint64_t free_v_of(uint64_t hw, uint64_t vw);
 // extend the same barrier. Used to find "funnelling" defensive walls.
 void touching_slots(Move m, uint64_t& h, uint64_t& v);
 
+// Route zone (wall relevance). Squares that lie on some route of the pawn at
+// `pawn` to its goal at most `slack` steps longer than the shortest one:
+// dist_from_pawn(sq) + dist_to_goal(sq) <= D + slack. `gl` must be a full goal
+// flood (no stop square). A huge slack gives the pawn's whole component, i.e.
+// every square the pawn can still reach. Squares outside every player's
+// component are dead for the rest of the game (walls are only ever added).
+BB route_zone(const BB* open, int pawn, const GoalLayers& gl, int slack);
+// Wall slots that block at least one edge with both ends inside `zone`.
+void zone_slots(BB zone, uint64_t& h, uint64_t& v);
+
 // Lattice points (the 10 x 10 wall corners) as a 100-bit set: bit i*10+j.
 struct Points {
     uint64_t lo = 0, hi = 0;

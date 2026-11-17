@@ -1,4 +1,5 @@
 #include "board.h"
+#include <algorithm>
 
 namespace quoridor {
 
@@ -274,6 +275,38 @@ void goal_layers_open(const BB* open, int player, GoalLayers& out, int stop_sq) 
         front = next;
     }
     out.count = k + 1;
+}
+
+BB route_zone(const BB* open, int pawn, const GoalLayers& gl, int slack) {
+    const int D = gl.dist(pawn);
+    if (D < 0) return BB{0, 0};
+    const int lim = D + std::max(0, slack);
+    const int top = std::min(lim, gl.count - 1);
+    BB pre[NSQ + 1];  // pre[j]: squares at most j steps from the goal
+    BB acc{0, 0};
+    for (int j = 0; j <= top; ++j) {
+        acc |= gl.layer[j];
+        pre[j] = acc;
+    }
+    BB front = BB::square(pawn), seen = front, zone{0, 0};
+    for (int k = 0; k <= lim && front.any(); ++k) {  // front: squares exactly k steps from the pawn
+        zone |= front & pre[std::min(lim - k, top)];
+        const BB next = expand_open(open, front) & ~seen;
+        seen |= next;
+        front = next;
+    }
+    return zone;
+}
+
+void zone_slots(BB zone, uint64_t& h, uint64_t& v) {
+    h = v = 0;
+    for (int r = 0; r < NW; ++r) {
+        const uint32_t a = zone.row(r), b = zone.row(r + 1);
+        const uint32_t e = a & b;                           // edges (r,c)-(r+1,c) inside the zone
+        const uint32_t f = (a & (a >> 1)) | (b & (b >> 1));  // edges (r,c)-(r,c+1) / (r+1,c)-(r+1,c+1)
+        h |= uint64_t((e | (e >> 1)) & 0xFF) << (r * NW);
+        v |= uint64_t(f & 0xFF) << (r * NW);
+    }
 }
 
 PathCut Board::shortest_path_cuts(int player, const GoalLayers& gl) const {

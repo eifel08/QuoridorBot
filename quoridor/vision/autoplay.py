@@ -26,6 +26,7 @@ import json
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field, fields, replace
 from typing import Callable, Optional
 
@@ -69,6 +70,7 @@ class ClickProfile:
     confirm_timeout: float = 4.0       # seconds to wait for the board to show the move
     retries: int = 1                   # extra attempts if the board does not change
     think_delay: float = 0.0           # extra wait before every move, in seconds
+    highlight_seconds: float = 1.0     # the move is shown on the board this long before the bot clicks
 
     @classmethod
     def load(cls, path: str) -> "ClickProfile":
@@ -433,30 +435,39 @@ class Signals:
 
 @dataclass
 class Identity:
-    """Which colour the bot plays and what that was read from."""
+    """Which colour the bot plays and what that was read from.
+
+    The bot always plays the player who starts on the bottom row (rank 1), so its
+    goal is always the top row (rank 9): it moves up the screen.
+    """
 
     me: int
     evidence: list[str] = field(default_factory=list)
+
+    def text(self) -> str:
+        return f"{PLAYER_NAMES[self.me]} (bottom), goal: top row (rank 9), moving up"
 
 
 def identify_bottom_player(res: ParseResult, require_start: bool = True) -> tuple[Optional[Identity], str]:
     """The colour of the bottom player, cross-checked. Returns ``(identity, problem)``.
 
     Three independent signs: the pawn standing on the bottom row (in the start
-    position), the tint of the bottom row, and the colour of the lower player
-    card. They must not contradict each other.
+    position), the edge-row tint, and the colour of the lower player card. They
+    must not contradict each other. The tint marks GOAL rows: a red bottom row is
+    Red's goal, so Red starts at the top and the bottom player is Blue.
     """
     if not res.ok or res.pawns is None:
         return None, "board not readable"
     votes: dict[str, int] = {}
-    at_start = (len(res.walls) == 0 and res.walls_left == (10, 10)
-                and {res.pawns[RED], res.pawns[BLUE]} == {(0, N // 2), (N - 1, N // 2)})
+    # The pawns on e1 / e9 with no wall placed can only be a start position. The wall
+    # counters are not required to read 10/10: one misread tick must not block the bot.
+    at_start = len(res.walls) == 0 and {res.pawns[RED], res.pawns[BLUE]} == {(0, N // 2), (N - 1, N // 2)}
     if at_start:
         votes["pawn on the bottom row"] = RED if res.pawns[RED][0] == N - 1 else BLUE
     elif require_start:
         return None, "waiting for the start position of a new game"
     if res.flipped is not None:
-        votes["bottom row tint"] = BLUE if res.flipped else RED
+        votes["edge-row tint (goal rows)"] = BLUE if res.flipped else RED
     dots = [res.cards[p].dot for p in (RED, BLUE)]
     if None not in dots and abs(dots[RED][1] - dots[BLUE][1]) > (res.geometry.pitch if res.geometry else 0):
         votes["bottom player card"] = RED if dots[RED][1] > dots[BLUE][1] else BLUE
@@ -488,7 +499,7 @@ class AutoPlayer:
         self.armed = False
         self.identity: Optional[Identity] = None
         self.ply: Optional[int] = None          # moves played so far, counted from the start position
-        self.state = "off"                      # off, waiting-start, opponent, thinking, moving, confirming, over
+        self.state = "off"                      # off, waiting-start, opponent, thinking, highlighting, moving, confirming, over
         self.message = "Auto-play is off"
         self.signals = Signals()
         self.last_move = ""                     # notation of the move last played by the bot
@@ -507,6 +518,27 @@ class AutoPlayer:
         self._worker: Optional[threading.Thread] = None
         self._worker_error: Optional[str] = None
         self._latest: Optional[Frame] = None
+        self.planned: Optional[Move] = None     # the move being highlighted / played (screen coordinates)
+        self._highlight_until = 0.0
+        #: Called in the thread that calls tick(), right before the mouse starts moving,
+        #: so the window can hide its move marker and the click lands on the game.
+        self.before_click: Optional[Callable[[], None]] = None
+        self.log_lines: deque = deque(maxlen=8)
+        self._noted = ""
+
+    # -- log -----------------------------------------------------------------
+    def log(self, text: str) -> None:
+        """One step of what the bot does, on the console and in the panel."""
+        line = time.strftime("%H:%M:%S ") + text
+        self.log_lines.append(line)
+        print("[auto-play] " + line, flush=True)
+
+    def _note(self, state: str, message: str) -> None:
+        """Set the state and message; log the message when it changes (waiting reasons, not every tick)."""
+        self.state, self.message = state, message
+        if message != self._noted:
+            self._noted = message
+            self.log(message)
 
     # -- control -----------------------------------------------------------
     @property
@@ -517,13 +549,16 @@ class AutoPlayer:
         self.stop.clear()
         self.armed = True
         self._my_turn_since = None
-        if self.state in ("off", "over"):
-            self.state, self.message = "waiting-start", "Waiting for the start position of a game..."
+        self.log("Auto-play switched on")
+        if self.identity is not None and self.ply is not None:
+            self._note("opponent", "Waiting for opponent...")  # carry on with the game being followed
+        elif self.state in ("off", "over"):
+            self._note("waiting-start", "Waiting for the start position of a game...")
 
     def disarm(self, message: str = "Auto-play is off") -> None:
         self.armed = False
-        self.state, self.message = "off", message
-        self._expected = self._pending = None
+        self._note("off", message)
+        self._expected = self._pending = self.planned = None
 
     def _halt(self, message: str) -> None:
         """Stop clicking because something is wrong; the user has to look and re-arm."""
@@ -557,11 +592,13 @@ class AutoPlayer:
             if new_frame:
                 self._confirm(frame, now)
             return
+        if self.state == "highlighting":
+            self._highlight_step(res, live, now)
+            return
         if live is None or current is None:
             return  # frame unreadable or the board is still changing
         if current.winner is not None:
-            self.state = "over"
-            self.message = "Game over: " + ("the bot won" if current.winner == self.me else "the opponent won")
+            self._note("over", "Game over: " + ("the bot won" if current.winner == self.me else "the opponent won"))
             return
         self._decide(res, current, analysis, now)
 
@@ -579,25 +616,30 @@ class AutoPlayer:
         identity, problem = identify_bottom_player(res, require_start=True)
         if identity is not None and (self.ply != 0 or self.identity is None or not same_board(self._board, live)):
             # the start position: a (new) game begins, lock the colour for this game
-            if identity.me != (BLUE if live.flipped else RED):
+            if live.goal_rows[identity.me] != 0:
+                # The bottom player must head for the top row; anything else is a misread orientation.
                 self.identity = None
-                self.message = "Start position seen, but the orientation is unclear: set 'Red starts at'."
+                self.message = "Start position seen, but the board orientation is unclear: set 'Red starts at'."
                 return
+            new_game = self.identity is None or self.ply != 0 or self.identity.me != identity.me
             self.identity, self.ply, self._board = identity, 0, live
             self._outlines_seen = False
             self.clocks.reset()
+            if new_game:
+                self.log(f"Start position: playing as {identity.text()} (from {', '.join(identity.evidence)})")
             if self.armed:
-                self.state = "opponent"
+                self._note("opponent", "Waiting for opponent..." if identity.me == BLUE else "My turn (Red moves first)")
             return
         if self.identity is None:
             if self.armed and self.join_in_progress:
                 identity, problem = identify_bottom_player(res, require_start=False)
-                if identity is not None and identity.me == (BLUE if live.flipped else RED):
+                if identity is not None and live.goal_rows[identity.me] == 0:
                     self.identity, self.ply, self._board = identity, None, live
-                    self.state = "opponent"
+                    self.log(f"Joined a game in progress: playing as {identity.text()}")
+                    self._note("opponent", "Waiting for a sign that it is my turn...")
                     return
             if self.armed:
-                self.state, self.message = "waiting-start", "Waiting: " + problem
+                self._note("waiting-start", "Waiting: " + problem)
             return
         if self._board is None or same_board(live, self._board):
             return
@@ -647,8 +689,10 @@ class AutoPlayer:
         s = self.signals = self.read_signals(res, now)
         if s.outlines == me:
             self._outlines_seen = True
-        hard = {"border": s.border, "outlines": s.outlines, "clock": s.clock}
-        soft = {"move list": s.move_list, "highlight": s.highlight}
+        # Hard: the site's own markings, which are never wrong about the turn. Soft: readings
+        # that can be fooled (OCR, pixels that change for other reasons); they only delay.
+        hard = {"border": s.border, "outlines": s.outlines}
+        soft = {"move list": s.move_list, "clock": s.clock, "highlight": s.highlight}
         if s.ply is not None:
             mine = s.ply == me
             if mine and all(v in (None, me) for v in (*hard.values(), *soft.values())):
@@ -660,32 +704,69 @@ class AutoPlayer:
             mine = me in hard.values() or me in soft.values()
         if not mine:
             self._my_turn_since = None
-            self.state, self.message = "opponent", "Waiting for opponent..."
+            self._note("opponent", "Waiting for opponent...")
             return
         if self._my_turn_since is None:
             self._my_turn_since = now
         waited = now - self._my_turn_since
         against = [name for name, v in hard.items() if v == 1 - me]
         if against:
-            self.state = "opponent"
-            self.message = f"Waiting: the move count says it is my turn, but {' and '.join(against)} say" \
-                           f"{'s' if len(against) == 1 else ''} it is the opponent's."
+            self._note("opponent", f"Waiting: the move count says it is my turn, but the {' and '.join(against)} "
+                                   f"say{'s' if len(against) == 1 else ''} it is the opponent's.")
             return
         doubts = [name for name, v in soft.items() if v == 1 - me]
         if doubts and waited < self.SOFT_OVERRIDE:
-            self.state, self.message = "opponent", f"Waiting for the {' and '.join(doubts)} to show the opponent's move..."
+            self._note("opponent", f"Waiting for the {' and '.join(doubts)} to agree that it is my turn...")
             return
         if self._outlines_seen and s.outlines != me and waited < self.OUTLINE_WAIT:
-            self.state, self.message = "thinking", "My turn: waiting for the legal-move outlines..."
+            self._note("thinking", "My turn: waiting for the legal-move outlines...")
             return
         if waited < self.profile.think_delay:
-            self.state, self.message = "thinking", "Thinking..."
+            self._note("thinking", "Thinking...")
             return
         if analysis is None or analysis.best is None or not same_board(analysis.position, current) \
                 or analysis.position.turn != me or analysis.position.flipped != current.flipped:
-            self.state, self.message = "thinking", "Thinking..."
+            self._note("thinking", "My turn: the engine is thinking...")
             return
-        self._start_move(current, analysis.best.move, retries=self.profile.retries)
+        self._begin_highlight(current, analysis)
+
+    # -- highlight, wait, click ------------------------------------------------------
+    def _begin_highlight(self, current: Position, analysis: Analysis) -> None:
+        """Show the move on the board first; it is clicked ``highlight_seconds`` later."""
+        move = analysis.best.move
+        self._before, self.planned = current, move
+        self._highlight_until = self._clock() + max(0.0, self.profile.highlight_seconds)
+        count = "move count unknown" if self.ply is None else f"move {self.ply}"
+        score = analysis.eval.text() if analysis.eval else "?"
+        self.log(f"Turn detected ({count}, {PLAYER_NAMES[self.me]} to move; signals: {self.signals.text()})")
+        self.log(f"Best move {move_notation(move)} (eval {score}) -> highlighting it, "
+                 f"clicking in {self.profile.highlight_seconds:g} s")
+        self.state, self.message = "highlighting", f"Highlighting {move_notation(move)}..."
+        self._noted = self.message
+
+    def _highlight_step(self, res: ParseResult, live: Optional[Position], now: float) -> None:
+        """While the move is shown: cancel if the board or the turn changes, else click when the time is up."""
+        move, before = self.planned, self._before
+        if move is None or before is None:
+            self._note("thinking", "Thinking...")
+            return
+        if live is None or not same_board(live, before):
+            if not res.ok and now < self._highlight_until + 2.0:
+                return  # one unreadable frame (a redraw): keep waiting a little
+            self.planned = None
+            self._note("thinking", f"Board changed while {move_notation(move)} was highlighted: not clicking")
+            return
+        s = self.signals = self.read_signals(res, now)
+        against = [name for name, v in (("border", s.border), ("outlines", s.outlines)) if v == 1 - self.me]
+        if against:
+            self.planned = None
+            self._note("opponent", f"Not clicking: the {' and '.join(against)} now show the opponent to move")
+            return
+        left = self._highlight_until - now
+        if left > 0:
+            self.message = f"Highlighting {move_notation(move)}, clicking in {left:.1f} s..."
+            return
+        self._start_move(before, move, retries=self.profile.retries)
 
     # -- making the move -----------------------------------------------------------
     def _start_move(self, current: Position, move: Move, retries: int) -> None:
@@ -693,10 +774,17 @@ class AutoPlayer:
         if frame is None or frame.result.geometry is None:
             return
         self._before, self._pending, self._retries_left = current, move, retries
+        self.planned = move
         self._expected = position_after(current, self.me, move)
         self._worker_error = None
-        self.state, self.message = "moving", f"Moving: {move_notation(move)}"
+        self.state, self.message = "moving", f"Clicking {move_notation(move)}..."
+        self._noted = self.message
         self.last_move = move_notation(move)
+        if self.before_click is not None:
+            try:
+                self.before_click()   # e.g. hide the move marker so it cannot catch the click
+            except Exception as exc:
+                self.log(f"could not hide the move marker: {exc}")
         if self._threaded:
             self._worker = threading.Thread(target=self._perform, args=(frame, current, move),
                                             name="autoplay-mouse", daemon=True)
@@ -726,6 +814,7 @@ class AutoPlayer:
             if isinstance(move, PawnMove):
                 target = frame.to_screen(*pawn_point(g, move))
                 pawn = frame.to_screen(*g.center(*current.pawns[self.me]))
+                self.log(f"Clicking {move_notation(move)}: pawn {prof.pawn_click} at {target}")
                 if prof.pawn_click == "drag":
                     hand.drag(*pawn, *target)
                 else:
@@ -754,7 +843,10 @@ class AutoPlayer:
             if not ticks:
                 raise RuntimeError("cannot find the wall reserve (tick bar) to drag a wall from")
             t = ticks[-1]
-            hand.drag(*frame.to_screen((t[0] + t[2]) / 2, (t[1] + t[3]) / 2), *frame.to_screen(*points[prof.wall_click]))
+            start = frame.to_screen((t[0] + t[2]) / 2, (t[1] + t[3]) / 2)
+            end = frame.to_screen(*points[prof.wall_click])
+            self.log(f"Clicking {move_notation(move)}: dragging a wall from {start} to {end}")
+            hand.drag(*start, *end)
             return
         order = [prof.wall_click] + [w for w in WALL_CLICKS if w != prof.wall_click]
         for i, where in enumerate(order):
@@ -764,8 +856,12 @@ class AutoPlayer:
             if seen is None or seen == target:
                 if seen == target and where != prof.wall_click:
                     prof.wall_click = where  # this is where this site wants the click: remember it
+                    self.log(f"the site previews this wall at the '{where}' point: using that from now on")
+                self.log(f"Clicking {move_notation(move)}: wall at the '{where}' point "
+                         f"{frame.to_screen(*points[where])}")
                 hand.press()
                 return
+            self.log(f"the site previews another wall at the '{where}' point: not clicking there")
             # The site previews a different wall here: do not click, try the next point.
         raise RuntimeError(f"the site previews another wall than {move_notation(move)} at every click point; "
                            "adjust 'wall_click' in the click profile")
@@ -796,8 +892,7 @@ class AutoPlayer:
             self._halt(self._worker_error)
             return
         # State-change lock: nothing else happens until the board shows the move.
-        self.state = "confirming"
-        self.message = f"Played {self.last_move}, waiting for the board to show it..."
+        self._note("confirming", f"Clicked {self.last_move}, waiting for the board to show it...")
         self._deadline = now + self.profile.confirm_timeout
         self._after_frame = (frame.number if frame else 0) + 1  # skip a frame captured during the click
         self._good_frames = 0
@@ -828,7 +923,7 @@ class AutoPlayer:
         if now < self._deadline:
             return
         if shown == (before.pawns, before.walls) and self._retries_left > 0 and self._pending is not None:
-            self.message = f"{self.last_move} did not register, trying again..."
+            self.log(f"{self.last_move} did not register, trying again")
             self._start_move(before, self._pending, self._retries_left - 1)
             return
         if shown == (before.pawns, before.walls):
@@ -842,6 +937,7 @@ class AutoPlayer:
             self.ply += plies
         self._board = replace(board, turn=None)
         self.moves_made += 1
-        self._expected = self._pending = self._before = None
+        self._expected = self._pending = self._before = self.planned = None
         self._my_turn_since = None
-        self.state, self.message = "opponent", "Waiting for opponent..."
+        self.log(f"{self.last_move} is on the board")
+        self._note("opponent", "Waiting for opponent...")

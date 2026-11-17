@@ -81,6 +81,7 @@ def render(pawns: Sequence[tuple[int, int]] = ((8, 4), (0, 4)),
            layout: str = "classic",
            flipped: bool = False,
            tint: bool = True,
+           tint_marks: str = "goal",
            moves: Sequence[str] = (),
            clocks: Sequence[str] = ("5:02", "4:32"),
            low_time: Optional[int] = None,
@@ -107,7 +108,12 @@ def render(pawns: Sequence[tuple[int, int]] = ((8, 4), (0, 4)),
 
     player_rgb = (theme.red, theme.blue)
     top_player = RED if flipped else BLUE
-    home = {0: top_player, N - 1: 1 - top_player}
+    # Each edge row is shaded in the colour of the player who has to reach it ("goal", like the
+    # real site) or of the player who starts on it ("home").
+    if tint_marks == "goal":
+        home = {0: 1 - top_player, N - 1: top_player}
+    else:
+        home = {0: top_player, N - 1: 1 - top_player}
     for r in range(N):
         color = theme.cell
         if tint and r in home:

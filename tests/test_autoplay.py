@@ -45,6 +45,8 @@ H, V = Orientation.HORIZONTAL, Orientation.VERTICAL
 
 
 def fast_profile(**changes):
+    """No pauses, so the tests are quick; the 1 s highlight is tested on its own."""
+    changes.setdefault("highlight_seconds", 0.0)
     return ClickProfile(move_seconds=(0.0, 0.0), hover_pause=0.0, press_seconds=0.0, confirm_timeout=2.0,
                         check_preview=False, **changes)
 
@@ -113,7 +115,7 @@ class TestIdentity(unittest.TestCase):
                 identity, problem = identify_bottom_player(res)
                 self.assertEqual(problem, "")
                 self.assertEqual(identity.me, expected)
-                self.assertEqual(identity.evidence, ["pawn on the bottom row", "bottom row tint", "bottom player card"])
+                self.assertEqual(identity.evidence, ["pawn on the bottom row", "edge-row tint (goal rows)", "bottom player card"])
 
     def test_needs_the_start_position_unless_joining(self):
         image, _ = render(pawns=((0, 4), (7, 4)), flipped=True, layout="timed")
@@ -122,7 +124,7 @@ class TestIdentity(unittest.TestCase):
         self.assertIsNone(identity)
         self.assertIn("start position", problem)
         identity, _ = identify_bottom_player(res, require_start=False)
-        self.assertEqual((identity.me, identity.evidence), (BLUE, ["bottom row tint", "bottom player card"]))
+        self.assertEqual((identity.me, identity.evidence), (BLUE, ["edge-row tint (goal rows)", "bottom player card"]))
 
     def test_disagreeing_signs_give_no_identity(self):
         image, _ = render(layout="timed")
@@ -303,6 +305,95 @@ class TestAutoPlayer(unittest.TestCase):
         sim.step(8)
         self.assertEqual((sim.player.me, sim.player.ply), (BLUE, 0))
         self.assertEqual(len(sim.mouse.clicks), 1)    # and it does not move: Red is to move
+
+
+@needs_cv
+class TestReportedBugs(unittest.TestCase):
+    """Goal-row tints (bottom row red = Red's goal) and highlight -> wait 1 s -> click."""
+
+    def test_bottom_player_marches_up_when_the_bottom_row_is_red(self):
+        sim = Sim(flipped=True)                       # Blue at the bottom, bottom row tinted red, top row blue
+        res = sim.frame().result
+        self.assertIs(res.red_tint_top, False)
+        identity, problem = identify_bottom_player(res)
+        self.assertEqual((identity.me, problem), (BLUE, ""))
+        self.assertIn("goal: top row (rank 9), moving up", identity.text())
+        sim.plan = {0: "e2"}
+        sim.player.arm()
+        sim.step(6)
+        cur = sim.tracker.current
+        self.assertIsNone(cur.winner)                 # it does not think it already stands on its goal
+        self.assertEqual(cur.goal_rows[BLUE], 0)      # Blue heads for the top row ...
+        self.assertEqual(cur.goal_rows[RED], 8)       # ... Red for the bottom row
+        self.assertEqual(sim.mouse.clicks, [])        # Red moves first
+        sim.play(RED, "e8")                           # Red (top) steps down
+        sim.step(6)
+        self.assertEqual(sim.mouse.clicks, [sim.cell_center("e2")])   # one square up from e1
+
+    def test_engine_move_goes_up_for_the_bottom_player(self):
+        from quoridor.bots import BotSpec
+        from quoridor.vision.analysis import Analyzer
+        import threading
+
+        done, results = threading.Event(), []
+        analyzer = Analyzer(BotSpec(depth=4, engine="py"), lambda a: (results.append(a), a.complete and done.set()))
+        try:
+            # Blue at the bottom (e1), Red at the top (e9) has moved to e8: Blue to move
+            analyzer.submit(Position(((1, 4), (8, 4)), (), (10, 10), BLUE, flipped=True))
+            self.assertTrue(done.wait(20))
+        finally:
+            analyzer.close()
+        self.assertEqual(results[-1].best.notation, "e2")
+
+    def test_misread_wall_counters_do_not_block_the_start(self):
+        sim = Sim(flipped=True)
+        res = sim.frame().result
+        res.walls_left = (9, 10)                      # one tick misread
+        identity, problem = identify_bottom_player(res)
+        self.assertEqual((identity.me, problem), (BLUE, ""))
+
+    def test_highlight_then_wait_one_second_then_click(self):
+        sim = Sim(profile=fast_profile(highlight_seconds=1.0))
+        order = []
+        sim.player.before_click = lambda: order.append(("hide marker", len(sim.mouse.events)))
+        sim.player.arm()
+        sim.step(2)                                   # start position seen, engine answer ready
+        self.assertEqual(sim.player.state, "highlighting")
+        self.assertEqual(sim.player.planned, PawnMove(7, 4))          # e2 is shown on the board ...
+        self.assertEqual(sim.mouse.events, [])                         # ... and nothing is clicked yet
+        sim.step(4)                                   # 0.8 s later: still only highlighted
+        self.assertEqual((sim.player.state, sim.mouse.events), ("highlighting", []))
+        sim.step(1)                                   # 1.0 s after the highlight began: now it clicks
+        self.assertEqual(sim.mouse.clicks, [sim.cell_center("e2")])
+        self.assertEqual(order, [("hide marker", 0)])  # the marker was taken away before the mouse moved
+        log = "\n".join(sim.player.log_lines)
+        for step in ("Turn detected", "highlighting it, clicking in 1 s", "Clicking e2: pawn target at"):
+            self.assertIn(step, log)
+        self.assertLess(log.index("Turn detected"), log.index("highlighting it"))
+        self.assertLess(log.index("highlighting it"), log.index("Clicking e2"))
+
+    def test_highlight_is_cancelled_when_the_board_changes(self):
+        sim = Sim(flipped=True, profile=fast_profile(highlight_seconds=1.0))
+        sim.player.arm()
+        sim.step(3)
+        sim.play(RED, "e8")
+        sim.step(5)
+        self.assertEqual(sim.player.state, "highlighting")
+        sim.play(BLUE, "d1")                          # the user plays Blue's move by hand during the highlight
+        sim.step(8)
+        self.assertEqual(sim.mouse.clicks, [])        # the stale move e2 is never clicked
+        self.assertIn("not clicking", "\n".join(sim.player.log_lines))
+        self.assertEqual((sim.player.armed, sim.player.ply, sim.player.state), (True, 2, "opponent"))
+
+    def test_a_wrong_clock_reading_only_delays(self):
+        sim = Sim()                                   # the bot is Red and moves first ...
+        sim.player.clocks.clock_turn = lambda now: BLUE   # ... but the clock reading insists on Blue
+        sim.player.arm()
+        sim.step(10)                                  # 2 s: waits for the signals to agree
+        self.assertEqual(sim.mouse.clicks, [])
+        self.assertIn("clock", sim.player.message)
+        sim.step(25)                                  # after 6 s the move count wins
+        self.assertEqual(len(sim.mouse.clicks), 1)
 
 
 @needs_cv

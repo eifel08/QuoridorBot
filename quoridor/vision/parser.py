@@ -17,8 +17,10 @@ and needs no pixel coordinates from the user:
    the two cards. Walls left are read from the tick bar, from the ``X/10``
    text when ``pytesseract`` is installed, and cross-checked against the
    number of walls on the board.
-5. **Orientation.** Each player's home row (top or bottom) is shaded in that
-   player's colour; the redder edge row is Red's (``ParseResult.flipped``).
+5. **Orientation.** Each edge row is shaded in the colour of the player whose
+   GOAL it is: a red bottom row means Red starts at the top and moves down, and
+   Blue starts at the bottom and moves up (``ParseResult.flipped``). At the start
+   position the pawns confirm this and correct the convention if a site differs.
 6. **Turn.** The card with the green border is the player to move. Timed /
    online layouts have no border; there the numbered move list between the
    cards is read (with ``pytesseract``): a last row with one move means the
@@ -73,7 +75,8 @@ class Profile:
     sidebar_width: float = 1.3         # width of the area searched for the player cards, in board widths
     ocr: bool = True                   # read "X/10" and the move list with pytesseract when it is installed
     tint_delta: float = 6.0            # how much redder one edge row must be than the other to tell the sides
-    tint_marks: str = "home"           # an edge row is tinted in the colour of its "home" player or its "goal" player
+    tint_marks: str = "goal"           # an edge row is tinted in the colour of the player whose "goal" it is
+                                       # (the site's convention) or who starts there ("home")
 
     @classmethod
     def load(cls, path: str) -> "Profile":
@@ -408,7 +411,8 @@ class ParseResult:
     walls_left: Optional[tuple[int, int]] = None       # (Red, Blue)
     walls_source: str = ""                             # "text", "ticks", "ticks+board", "board"
     walls_consistent: bool = False                     # sidebar counts agree with the walls on the board
-    flipped: Optional[bool] = None                     # True: Red's home row is the top row; None: no tint seen
+    flipped: Optional[bool] = None                     # True: Red starts on the top row; None: no tint seen
+    red_tint_top: Optional[bool] = None                # raw reading: True if the top edge row is the redder one
     border_turn: Optional[int] = None                  # player whose card has the green border
     move_list_turn: Optional[int] = None               # player to move according to the move list (needs OCR)
     move_list_plies: Optional[int] = None              # moves played, when the row number was readable too
@@ -512,7 +516,9 @@ class ScreenParser:
             res.reason = "; ".join(problems)
             return res
 
-        res.flipped = self._orientation(cells)
+        res.red_tint_top = self._red_tint_top(cells)
+        res.flipped = self._orientation(res.red_tint_top)
+        self._check_tint_convention(res)
         res.hints = self._find_hints(bgr, g, res.pawns)
         res.hint_turn = _hint_turn(res)
         self._resolve_walls_left(res)
@@ -526,11 +532,11 @@ class ScreenParser:
         return res
 
     # -- orientation ------------------------------------------------------
-    def _orientation(self, cells: np.ndarray) -> Optional[bool]:
-        """Is Red's home row the top row? Read from the tint of the two edge rows.
+    def _red_tint_top(self, cells: np.ndarray) -> Optional[bool]:
+        """Which edge row is redder: True = the top row, False = the bottom row, None = no tint.
 
-        Each player's home row is shaded in that player's colour, so the redder
-        of the two edge rows (compared with the rows in between) is Red's.
+        Both edge rows are compared with the rows in between, so the cells' own
+        colour does not matter, only the shade added on top of it.
         """
         middle = np.median(cells[1:N - 1].reshape(-1, 3), axis=0)
         top = np.median(cells[0], axis=0) - middle
@@ -538,8 +544,39 @@ class ScreenParser:
         redness = (top[2] - top[0]) - (bottom[2] - bottom[0])  # BGR: red minus blue
         if abs(redness) < self.profile.tint_delta:
             return None
-        red_on_top = bool(redness > 0)
-        return red_on_top if self.profile.tint_marks == "home" else not red_on_top
+        return bool(redness > 0)
+
+    def _orientation(self, red_top: Optional[bool]) -> Optional[bool]:
+        """Does Red start on the top row? From the tint, by the profile's convention.
+
+        "goal" (the site's convention): a row is shaded in the colour of the player
+        who has to reach it. A red top row is Red's goal, so Red starts at the
+        bottom and moves up; a red bottom row means Red starts at the top.
+        "home": a row is shaded in the colour of the player who starts there.
+        """
+        if red_top is None:
+            return None
+        return red_top if self.profile.tint_marks == "home" else not red_top
+
+    def _check_tint_convention(self, res: ParseResult) -> None:
+        """At the start position the pawns show who starts where: correct the tint convention if needed.
+
+        Both pawns on the e-file edge squares with no wall on the board can only be
+        a start position (the swapped arrangement would have both players on their
+        goals, and a game ends when the first one gets there).
+        """
+        if res.red_tint_top is None or res.walls or res.pawns is None:
+            return
+        if {res.pawns[RED], res.pawns[BLUE]} != {(0, N // 2), (N - 1, N // 2)}:
+            return
+        red_starts_top = res.pawns[RED][0] == 0
+        if res.flipped == red_starts_top:
+            return
+        other = "home" if self.profile.tint_marks == "goal" else "goal"
+        res.warnings.append(f"the edge-row tint marks each player's {other} row on this site, not its "
+                            f"{self.profile.tint_marks} row: switched (set tint_marks in the profile to keep it)")
+        self.profile.tint_marks = other
+        res.flipped = red_starts_top
 
     # -- move list -----------------------------------------------------------
     def _read_move_list(self, bgr, g: Geometry, res: ParseResult) -> None:

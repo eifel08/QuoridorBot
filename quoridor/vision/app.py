@@ -146,6 +146,7 @@ class Overlay:
             assert self._canvas is not None
             self._win.geometry(f"{ax2 - ax1}x{ay2 - ay1}+{ax1}+{ay1}")
             self._win.deiconify()
+            make_click_through(self._win)  # again after deiconify: clicks must go through to the game
             c = self._canvas
             c.delete("all")
             if self.excluded:  # invisible to our own screenshots: draw freely
@@ -167,8 +168,8 @@ class Overlay:
             win.deiconify()
             win.lift()
 
-    def hide(self) -> None:
-        if self._shown is None:
+    def hide(self, force: bool = False) -> None:
+        if self._shown is None and not force:
             return
         self._shown = None
         if self._win is not None:
@@ -184,6 +185,12 @@ class Overlay:
 # Application
 # ---------------------------------------------------------------------- #
 class AssistantApp:
+    #: Auto-Play reuses this window. It leaves out what does not apply there: the alternatives,
+    #: "Show move for", "Mark the move on the board" (it marks the move it is about to click), and
+    #: "Side to move" (its exact move count decides the turn; a manual side would make the engine
+    #: analyse the opponent's move and the bot would never get a move of its own to play).
+    AUTOPLAY = False
+
     def __init__(self, spec: BotSpec = DEFAULT_SPEC, monitor: int = 1, fps: float = 5.0,
                  profile: Optional[Profile] = None, debug: bool = False, overlay: bool = True,
                  grabber=None) -> None:
@@ -270,9 +277,10 @@ class AssistantApp:
         self.move_sub = self._label(right, "", DIM, 9)
         self.move_sub.pack(fill="x")
 
-        self._label(root, "Alternatives", DIM, 9).pack(fill="x", **pad)
         self.alt_label = tk.Label(root, text="-", fg=TEXT, bg=BG, font=("Consolas", 10), anchor="w", justify="left")
-        self.alt_label.pack(fill="x", padx=12)
+        if not self.AUTOPLAY:
+            self._label(root, "Alternatives", DIM, 9).pack(fill="x", **pad)
+            self.alt_label.pack(fill="x", padx=12)
         self.info_label = self._label(root, "", DIM, 9, wraplength=300)
         self.info_label.pack(fill="x", **pad)
         self.warn_label = self._label(root, "", WARN, 9, wraplength=300)
@@ -280,7 +288,20 @@ class AssistantApp:
 
         # bot settings
         box = tk.Frame(root, bg=CARD)
-        box.pack(fill="x", padx=12, pady=10)
+        if self.AUTOPLAY:  # folded away, so the panel fits on a 1080-pixel screen
+            def toggle() -> None:
+                if box.winfo_ismapped():
+                    box.pack_forget()
+                    fold.config(text="Bot settings ▸")
+                else:
+                    box.pack(fill="x", padx=12, pady=(0, 10))
+                    fold.config(text="Bot settings ▾")
+
+            fold = tk.Button(root, text="Bot settings ▸", command=toggle, bg=BG, fg=DIM, activebackground=CARD,
+                             activeforeground=TEXT, relief="flat", anchor="w")
+            fold.pack(fill="x", padx=12, pady=(8, 2))
+        else:
+            box.pack(fill="x", padx=12, pady=10)
         self.depth_var = tk.StringVar(value=str(self.spec.depth))
         self.time_var = tk.StringVar(value=f"{self.spec.time_limit:g}" if self.spec.time_limit else "no limit")
         wall_name = next((n for n, v, _ in WALL_MODES if v == self.spec.wall_filter), "both")
@@ -305,6 +326,8 @@ class AssistantApp:
                                               values=("Auto", "Red", "Blue"))),
                 ("Red starts at", ttk.Combobox(box, width=10, textvariable=self.side_var, state="readonly",
                                                values=("Auto", "Bottom", "Top")))]
+        if self.AUTOPLAY:
+            rows = [row for row in rows if row[0] not in ("Show move for", "Side to move")]
         if self.spec.kind != "ab":
             rows = rows[4:]
             self._label(box, f"Bot: {self.spec.label()}", DIM, 9).grid(row=0, column=0, columnspan=2, sticky="w",
@@ -317,8 +340,8 @@ class AssistantApp:
             widget.bind("<FocusOut>", self._apply_spec)
         box.columnconfigure(1, weight=1)
         n = len(rows) + 1
-        for i, (text, var) in enumerate((("Mark the move on the board", self.overlay_var),
-                                         ("Debug / calibration preview", self.debug_var))):
+        checks = [("Mark the move on the board", self.overlay_var), ("Debug / calibration preview", self.debug_var)]
+        for i, (text, var) in enumerate(checks[1:] if self.AUTOPLAY else checks):
             tk.Checkbutton(box, text=text, variable=var, bg=CARD, fg=TEXT, selectcolor=BG, activebackground=CARD,
                            activeforeground=TEXT, anchor="w", command=self._toggle_preview
                            ).grid(row=n + i, column=0, columnspan=2, sticky="w", padx=6)
@@ -514,17 +537,22 @@ class AssistantApp:
                 or not frame.result.ok or (advise is not None and analysis.position.turn != advise)):
             self.overlay.hide()
             return
-        move = analysis.best.move
+        self._mark_move(frame, analysis.position, analysis.best.move, analysis.best.notation)
+
+    def _mark_move(self, frame: Frame, position: Position, move, label: str) -> None:
+        """Outline ``move`` (screen coordinates) on the board: the target square or the wall slot."""
+        g = frame.result.geometry
         origin = None
         if isinstance(move, PawnMove):
             x1, y1, x2, y2 = g.cell_rect(move.row, move.col)
-            origin = frame.to_screen(*g.center(*analysis.position.pawns[analysis.position.turn]))
+            if position.turn is not None:
+                origin = frame.to_screen(*g.center(*position.pawns[position.turn]))
         else:
             x1, y1, x2, y2 = g.wall_rect(move.row, move.col, move.orientation.value, g.gap + 0.2 * g.side)
         sx1, sy1 = frame.to_screen(x1, y1)
         sx2, sy2 = frame.to_screen(x2, y2)
         area = (frame.left, frame.top, *frame.to_screen(frame.width, frame.height))
-        self.overlay.show(area, (sx1, sy1, sx2, sy2), analysis.best.notation, origin)
+        self.overlay.show(area, (sx1, sy1, sx2, sy2), label, origin)
 
     def _show_preview(self, frame: Optional[Frame], pos: Optional[Position]) -> None:
         if self._preview_label is None or frame is None or frame.image is None:

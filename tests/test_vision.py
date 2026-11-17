@@ -221,18 +221,44 @@ class TestOrientation(unittest.TestCase):
     def parse(self, image, **profile):
         return ScreenParser(Profile(**{**NO_OCR, **profile})).parse(image)
 
-    def test_tint_tells_the_home_rows(self):
+    def test_tint_marks_the_goal_rows(self):
+        """The site shades each edge row in the colour of the player who has to REACH it."""
         for theme in (DARK, LIGHT):
             for layout in ("classic", "timed"):
-                normal, _ = render(theme=theme, layout=layout)
+                normal, _ = render(theme=theme, layout=layout)       # Red at the bottom: top row red
                 flipped, _ = render(pawns=((0, 4), (8, 4)), flipped=True, theme=theme, layout=layout)
-                self.assertIs(self.parse(normal).flipped, False)
-                self.assertIs(self.parse(flipped).flipped, True)
+                res = self.parse(normal)
+                self.assertEqual((res.red_tint_top, res.flipped), (True, False))
+                res = self.parse(flipped)                            # Blue at the bottom: bottom row red
+                self.assertEqual((res.red_tint_top, res.flipped), (False, True))
         plain, _ = render(tint=False)
         self.assertIsNone(self.parse(plain).flipped)
-        # a UI that shades the goal rows instead of the home rows
-        flipped, _ = render(pawns=((0, 4), (8, 4)), flipped=True)
-        self.assertIs(self.parse(flipped, tint_marks="goal").flipped, False)
+
+    def test_red_bottom_row_means_blue_starts_at_the_bottom(self):
+        # The reference screenshot: bottom row red, top row blue, mid-game (no start position to check against)
+        image, _ = render(pawns=((3, 4), (6, 2)), flipped=True, walls=[(4, 4, "h")], walls_left=(9, 10),
+                          layout="timed")
+        res = self.parse(image)
+        self.assertTrue(res.ok, res.reason)
+        self.assertIs(res.red_tint_top, False)
+        self.assertIs(res.flipped, True)                     # Red starts at the top ...
+        pos = Position(res.pawns, res.walls, res.walls_left, BLUE, res.flipped)
+        self.assertEqual(pos.goal_rows, (8, 0))              # ... and heads for the bottom; Blue goes up
+        self.assertIsNone(pos.winner)
+        self.assertEqual(res.warnings, [])
+
+    def test_other_tint_convention_is_corrected_at_the_start_position(self):
+        # A site that shades home rows instead: the start position shows it, the parser adapts
+        parser = ScreenParser(Profile(ocr=False))
+        image, _ = render(pawns=((0, 4), (8, 4)), flipped=True, tint_marks="home", layout="timed")
+        res = parser.parse(image)
+        self.assertIs(res.flipped, True)
+        self.assertTrue(any("home row" in w for w in res.warnings))
+        self.assertEqual(parser.profile.tint_marks, "home")
+        later, _ = render(pawns=((2, 4), (6, 4)), flipped=True, tint_marks="home", layout="timed")
+        self.assertIs(parser.parse(later).flipped, True)     # kept for the rest of the session
+        # an explicit setting is honoured where no start position contradicts it
+        self.assertIs(self.parse(later, tint_marks="goal").flipped, False)
 
     def test_tint_is_read_with_pawns_and_walls_on_the_edge_rows(self):
         image, _ = render(pawns=((0, 2), (8, 7)), flipped=True, walls=[(0, 0, "h"), (7, 5, "h"), (0, 4, "v")],

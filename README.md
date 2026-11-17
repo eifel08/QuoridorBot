@@ -176,9 +176,10 @@ Two variants of the same UI are supported, and they are told apart automatically
   and ranks `1`-`9` on its right. One red and one blue pawn. Walls sit in the gaps and may have
   any colour. The white/grey outlines on legal target squares are ignored when looking for pawns
   and walls.
-- **Orientation:** either player can be at the bottom. Each player's **home row** (top row or
-  bottom row) is shaded in that player's colour, which tells who started where and therefore
-  which row each player has to reach.
+- **Orientation:** either player can be at the bottom. Each edge row is shaded in the colour of
+  the player whose **goal** it is. A **red bottom row** and a blue top row mean Red starts at the
+  top and moves down, and Blue starts at the bottom and moves up. A red top row and a blue
+  bottom row mean the opposite.
 - **Player cards, right of the board:** one at the top and one at the bottom, each with a dot
   in the player's colour, a bar of wall ticks and an `X/10` readout.
 - **Local games:** the card of the player to move has a **green border**.
@@ -193,7 +194,7 @@ The board and the cards are found automatically, at any position and size (squar
 | What | How |
 |---|---|
 | Board | a 9x9 lattice of equal squares is searched on the whole screen once; afterwards only that spot is re-checked each frame, and the search runs again if the board moves |
-| Orientation | the top and the bottom row are compared with the rows in between: the redder one is Red's home row. Without any tint the first position decides (each pawn is still on its own side) and is remembered; *Red starts at* in the panel overrides it |
+| Orientation | the top and the bottom row are compared with the rows in between: the redder one is **Red's goal row**, so Red starts on the other edge. At the start position the pawns confirm this; if a site shades the rows the other way round, the reading is corrected there and a warning says so. Without any tint the first position decides (each pawn is still on its own side) and is remembered; *Red starts at* in the panel overrides it |
 | Pawns | the cell whose centre is red / blue and differs from the cell's own corners |
 | Walls | each groove segment is compared with the usual groove colour; occupied segments are paired into walls. A half-placed or hovering wall makes the frame "not readable" and is skipped |
 | Player cards | the round blob of each colour that has a row of wall ticks next to it. Coloured dots in the chat, avatars or a red clock are not mistaken for it; with no ticks left, the two blobs farthest apart are the cards |
@@ -265,7 +266,7 @@ walls left and warnings. `--assistant-image shot.png` produces the same picture 
 | walls are missed or invented | lower or raise `wall_delta` in the profile |
 | wall counts are wrong | the preview shows which ticks were counted; install pytesseract for the text readout, or rely on the board check |
 | turn is wrong or unknown | the panel shows where the turn came from; install pytesseract for the move list, or set *Side to move* |
-| the players' directions are swapped | set *Red starts at* in the panel; if the UI shades the goal rows instead of the home rows, put `"tint_marks": "goal"` in the profile |
+| the players' directions are swapped | set *Red starts at* in the panel. The tint is read as marking goal rows (`"tint_marks": "goal"`); for a site that shades each player's starting row instead, put `"tint_marks": "home"` in the profile (this is also detected at a start position) |
 
 Profile keys and defaults (hues are OpenCV's 0-179 scale):
 
@@ -282,7 +283,7 @@ Profile keys and defaults (hues are OpenCV's 0-179 scale):
   "sidebar_width": 1.3,
   "ocr": true,
   "tint_delta": 6.0,
-  "tint_marks": "home"
+  "tint_marks": "goal"
 }
 ```
 
@@ -330,6 +331,34 @@ for the assistant. Depth, think time, walls and engine can be changed in the pan
 **Start auto-play** in the panel (`--armed` presses it at launch). The button turns into a red
 **STOP**.
 
+### What happens on its turn
+
+1. **Turn detected:** the move count and the other signals (below) agree it is the bot's turn.
+2. **Best move:** the engine's answer for the position (C++ engine, or the bot you chose).
+3. **Highlight:** the move is outlined in magenta on the board, the target square or the exact
+   wall slot, and the panel shows `ABOUT TO PLAY` with a countdown.
+4. **Wait 1 second** with the highlight visible (`highlight_seconds` in the click profile). If the
+   board changes, or the site starts showing the opponent to move, the move is dropped and
+   nothing is clicked.
+5. **Click:** the marker is taken off the screen first, so the click lands on the game and not
+   on our own window (on Windows the marker window is also click-through, and all assistant
+   windows are left out of screen captures). Then the cursor glides to the point and clicks.
+6. **Confirm:** nothing else happens until the board shows the move.
+
+Every step is printed on the console, and the last ones are listed in the panel:
+
+```
+[auto-play] 01:46:26 Start position: playing as Blue (bottom), goal: top row (rank 9), moving up (from pawn on the bottom row, edge-row tint (goal rows), bottom player card)
+[auto-play] 01:46:27 Turn detected (move 1, Blue to move; signals: ply: Blue, outlines: Blue, highlight: Blue)
+[auto-play] 01:46:27 Best move e2 (eval +0.5) -> highlighting it, clicking in 1 s
+[auto-play] 01:46:28 Clicking e2: pawn target at (790, 644)
+[auto-play] 01:46:29 e2 is on the board
+```
+
+When it is not moving, the console and the panel say what it is waiting for (for example
+`Waiting: signs disagree about the bottom player (...)` or `Waiting for the clock to agree that
+it is my turn...`), so a bot that only analyses can always be traced to a reason.
+
 ### Emergency stop
 
 Any of these halts the bot at once, also in the middle of a mouse movement, and switches
@@ -345,28 +374,33 @@ a retry, when the board shows something it did not expect, or when it lost count
 
 ### Which colour it plays
 
-Auto-Play plays **only the bottom player**. At the start position it reads three signs and
-they must not contradict each other: the pawn standing on the bottom row, the tint of the
-bottom row, and the colour of the lower player card. The colour is then locked for that game
-and shown in the panel ("Playing as: Blue (bottom)", with the signs it was read from). A new
-start position starts a new game and locks the colour again.
+Auto-Play plays **only the bottom player**, so it always moves **up**, from rank 1 to rank 9.
+At the start position it reads three signs and they must not contradict each other: the pawn
+standing on the bottom row, the edge-row tint (read as goal rows: a red bottom row means the
+bottom player is Blue), and the colour of the lower player card. The wall counters do not have
+to read 10/10 for this. The colour is then locked for that game and shown in the panel
+("Playing as: Blue (bottom), goal: top row (rank 9), moving up", with the signs it was read
+from). A new start position starts a new game and locks the colour again.
 
 ### How it knows it is its turn
 
-All of these are combined, and the bot clicks only when the first one says it is its turn and
-none of the others says it is the opponent's:
+All of these are combined. The bot moves only when the move count says it is its turn. The
+site's own markings (green border, legal-move outlines) can stop it; the readings that can be
+fooled (clocks, move list, highlighted clock box) can only delay it, by up to 6 s, so a
+misreading never blocks it for good:
 
 | Signal | How it is used |
 |---|---|
 | **Move count** | counted from move 0: every change of the board must be exactly one legal move of the player whose turn it is (Red moves first: even count = Red, odd = Blue). Two moves seen at once are accepted if they split into one legal move each. Anything else stops the bot |
-| **Clocks** | only the running clock changes, so the pixels of the two player cards are compared over a few seconds: if the opponent's card keeps changing and the bot's does not, it waits. If one card is brighter whenever its player is to move (a highlighted clock box), that is learned during the game and used as well |
+| **Clocks** | only the running clock changes, so the pixels of the two player cards are compared over a few seconds: if the opponent's card keeps changing and the bot's does not, it waits (up to 6 s). If one card is brighter whenever its player is to move (a highlighted clock box), that is learned during the game and used as well |
 | **Legal-move outlines** | outlines of the opponent's moves block the click. Once the site has shown outlines on the bot's turn, the bot waits for them (up to 5 s) before moving |
 | **Green border** | a border on the opponent's card blocks the click |
 | **Move list** | a list that shows the opponent to move makes the bot wait up to 6 s for it to catch up; it is then overruled, because OCR can misread a row |
 | **State-change lock** | after a move the bot does nothing until two frames in a row show the board with that move on it (or that move plus the opponent's legal reply). If nothing changed after 4 s it tries once more, then stops |
 
-The panel shows the state (`WAITING FOR OPPONENT`, `THINKING`, `MOVING`), the move count and
-what each signal currently says.
+The panel shows the state (`WAITING FOR OPPONENT`, `THINKING`, `ABOUT TO PLAY`, `CLICKING`),
+the move count and what each signal currently says. In Auto-Play the panel has no *Side to
+move* box (the move count decides) and the bot settings are folded under *Bot settings*.
 
 ### How moves are clicked
 
@@ -404,7 +438,8 @@ Everything about clicking is in one small JSON file (`--click-profile`); the def
   "check_preview": true,
   "confirm_timeout": 4.0,
   "retries": 1,
-  "think_delay": 0.0
+  "think_delay": 0.0,
+  "highlight_seconds": 1.0
 }
 ```
 
@@ -416,6 +451,7 @@ Everything about clicking is in one small JSON file (`--click-profile`); the def
 | `wall_key_h` / `wall_key_v` | a key to press before a horizontal / vertical wall, for sites with a wall mode or an orientation toggle |
 | `move_seconds` | shortest and longest cursor travel time; `hover_pause`: rest before the click |
 | `confirm_timeout`, `retries` | how long to wait for the board to show the move, and how often to try again |
+| `highlight_seconds` | how long the move is shown on the board before the click (0 = click at once) |
 
 The clicking code is `quoridor/vision/autoplay.py`: `pawn_point` and `wall_points` turn a move
 into a point, `AutoPlayer.perform` / `_place_wall` do the gestures.

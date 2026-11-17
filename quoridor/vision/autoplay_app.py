@@ -14,21 +14,28 @@ from typing import Optional
 
 from ..moves import Orientation, WallMove
 from .analysis import DEFAULT_SPEC
-from .app import BG, BLUE_HEX, CARD, DIM, GOOD, RED_HEX, TEXT, WARN, AssistantApp
+from .app import BG, BLUE_HEX, CARD, DIM, GOOD, MARK, RED_HEX, TEXT, WARN, AssistantApp, enable_dpi_awareness
 from .autoplay import WALL_CLICKS, AutoPlayer, ClickProfile, EmergencyStop, PyAutoGuiMouse, StopSwitch, wall_points
-from .parser import PLAYER_NAMES, Profile
+from .parser import Profile
 
 STATE_TEXT = {"off": "OFF", "waiting-start": "WAITING FOR A GAME", "opponent": "WAITING FOR OPPONENT",
-              "thinking": "THINKING", "moving": "MOVING", "confirming": "MOVING", "over": "GAME OVER"}
+              "thinking": "THINKING", "highlighting": "ABOUT TO PLAY", "moving": "CLICKING",
+              "confirming": "CLICKED", "over": "GAME OVER"}
 
 
 class AutoPlayApp(AssistantApp):
+    AUTOPLAY = True
+
     def __init__(self, spec=DEFAULT_SPEC, monitor: int = 1, fps: float = 5.0, profile: Optional[Profile] = None,
                  debug: bool = False, click_profile: Optional[ClickProfile] = None, join_in_progress: bool = False,
                  mouse=None, grabber=None) -> None:
+        # Before pyautogui is loaded: it would make the process only "system" DPI aware on
+        # Windows, and clicks would then miss on scaled or mixed-DPI monitors.
+        enable_dpi_awareness()
         self.stop = StopSwitch()
         self.click_profile = click_profile or ClickProfile()
         self.player = AutoPlayer(mouse or PyAutoGuiMouse(), self.click_profile, self.stop, join_in_progress)
+        self.player.before_click = self._before_click
         self._hover_test = 0
         super().__init__(spec, monitor, fps, profile, debug, overlay=False, grabber=grabber)
         self.root.title("Quoridor Auto-Play")
@@ -68,6 +75,8 @@ class AutoPlayApp(AssistantApp):
         ttk.Combobox(row, width=8, textvariable=self.wall_var, state="readonly", values=WALL_CLICKS).pack(side="right")
         tk.Button(box, text="Test wall hover (no click)", command=self._test_hover, bg=BG, fg=TEXT,
                   activebackground=CARD, activeforeground=TEXT, relief="flat").pack(fill="x", padx=10, pady=(6, 0))
+        self.auto_log = tk.Label(box, text="", fg=DIM, bg=CARD, font=("Consolas", 8), anchor="w", justify="left")
+        self.auto_log.pack(fill="x", padx=10, pady=(6, 0))
         self.join_var = tk.BooleanVar(value=self.player.join_in_progress)
         tk.Checkbutton(box, text="Join a game in progress", variable=self.join_var, bg=CARD, fg=TEXT, selectcolor=BG,
                        activebackground=CARD, activeforeground=TEXT, anchor="w").pack(fill="x", padx=6, pady=(2, 6))
@@ -97,6 +106,24 @@ class AutoPlayApp(AssistantApp):
         self.auto_message.config(text=f"Cursor is where a {kind} would be clicked. If the site previews another "
                                       "wall, choose a different wall click point.")
 
+    # -- the move marker -------------------------------------------------------------------
+    def _show_overlay(self, frame, analysis) -> None:
+        """Auto-Play marks only the move it is about to click, during the highlight before the click."""
+        player = self.player
+        res = frame.result if frame else None
+        if (player.state != "highlighting" or player.planned is None or frame is None or res is None
+                or res.geometry is None or not res.ok or player._before is None):
+            self.overlay.hide()
+            return
+        from .position import move_notation
+
+        self._mark_move(frame, player._before, player.planned, move_notation(player.planned))
+
+    def _before_click(self) -> None:
+        """Right before the mouse moves: take the marker off the screen so the click reaches the game."""
+        self.overlay.hide(force=True)
+        self.root.update_idletasks()
+
     # -- periodic update ---------------------------------------------------------------
     def _refresh(self) -> None:
         super()._refresh()
@@ -108,13 +135,14 @@ class AutoPlayApp(AssistantApp):
             analysis = self._analysis
         was_testing = "Cursor is where" in self.auto_message.cget("text") and not player.armed
         player.tick(self.watcher.latest, self.tracker.current, analysis)
+        self._show_overlay(self.watcher.latest, None)   # marker on / off right away, not on the next refresh
         if self.wall_var.get() != self.click_profile.wall_click:
             self.wall_var.set(self.click_profile.wall_click)   # learned from the site's preview
         # the exact move count is the best turn indicator there is: let the panel and the analysis use it
         self.tracker.counted_turn = None if player.ply is None else player.ply % 2
 
-        colour = {"off": DIM, "waiting-start": WARN, "opponent": TEXT, "thinking": GOOD, "moving": GOOD,
-                  "confirming": GOOD, "over": WARN}[player.state]
+        colour = {"off": DIM, "waiting-start": WARN, "opponent": TEXT, "thinking": GOOD, "highlighting": MARK,
+                  "moving": GOOD, "confirming": GOOD, "over": WARN}[player.state]
         if not player.armed and player.message.startswith(("STOPPED", "Stopped")):
             colour = RED_HEX
         self.auto_state.config(text=STATE_TEXT[player.state] if player.armed else "OFF", fg=colour)
@@ -122,7 +150,7 @@ class AutoPlayApp(AssistantApp):
             self.auto_message.config(text=player.message)
         if player.identity is not None:
             me = player.me
-            self.auto_identity.config(text=f"Playing as: {PLAYER_NAMES[me]} (bottom)", fg=(RED_HEX, BLUE_HEX)[me])
+            self.auto_identity.config(text=f"Playing as: {player.identity.text()}", fg=(RED_HEX, BLUE_HEX)[me])
             count = "move count unknown" if player.ply is None else f"move {player.ply}"
             self.auto_signals.config(text=f"Seen by: {', '.join(player.identity.evidence)}\n"
                                           f"{count} · turn signals: {player.signals.text()}"
@@ -130,6 +158,9 @@ class AutoPlayApp(AssistantApp):
         else:
             self.auto_identity.config(text="Playing as: - (the bottom player, locked at the start position)", fg=TEXT)
             self.auto_signals.config(text="")
+        # the last steps, one line each (the console has them in full)
+        lines = [line[9:] if len(line) > 9 else line for line in list(player.log_lines)[-4:]]
+        self.auto_log.config(text="\n".join(line if len(line) <= 42 else line[:41] + "…" for line in lines))
         if player.armed:
             self.auto_button.config(text="STOP (Esc)", bg="#b3261e", activebackground="#d0342c")
         else:

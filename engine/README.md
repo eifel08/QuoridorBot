@@ -431,6 +431,24 @@ The flat count claimed wins in races the opponent was about to win with a path t
 no longer touch; the blockability eval no longer does. The corridor position in the tests shows
 the extreme case (+59 before, -1 now, forced loss proven at depth 1).
 
+### Wall relevance and leaf quiescence
+
+New engine (relevance pruning, threat-gated defense, surplus value, quiescence, `def_min_depth=1`)
+against the previous binary, and one feature switched off at a time (same binary). 4-core cloud
+VM, colours alternated.
+
+| A | B | Setting | A wins |
+|---|---|---|---|
+| new defaults | previous engine | 0.3 s per move, 120 games | **66.7%** (80-40, depth 12.4 vs 12.0) |
+| new defaults | previous engine | 0.1 s per move, 200 games | **55.5%** (111-89, depth 11.2 vs 10.4) |
+| `qsearch=1` | `qsearch=0` | 0.1 s per move, 200 games | 53.5% (107-92, 1 draw) |
+| `def_min_depth=1` | `def_min_depth=2` | 0.1 s per move, 200 games | 53.5% (107-93) |
+| `wall_zone=4` | `wall_zone=-1` (dead regions only) | 0.1 s per move, 200 games | 49.5% (99-101) |
+
+The route zone is neutral for strength; its purpose is that walls behind both pawns are never
+played. In 40 self-play games the previous engine placed 4 walls outside every route zone, the
+new one none (in both `wall_filter=1` and `0`).
+
 ### Wall weight and the dynamic wall value (0.05 s per move, colours alternated)
 
 | A | B | A wins |

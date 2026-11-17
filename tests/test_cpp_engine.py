@@ -206,6 +206,20 @@ class TestSearch(EngineCase):
         board.apply_move(0, move)
         self.assertGreater(board.shortest_path_length(1), 1)
 
+    def test_surplus_walls_are_capped(self):
+        # Red: 4 steps, 6 walls; Blue: 2 steps, no walls; Red to move. Red only has about
+        # 2 + 1 turns left to place walls, so only 3 of its 6 walls count.
+        pos = "position 0 4 0 6 4 6 0"
+        self.engine.set_position(pos)
+        self.assertEqual(self.engine.evaluate(), (2 - 4) * 10 + 3 * 16 + 5)
+        self.engine.set_option("wall_cap", 0)
+        self.engine.set_position(pos)
+        self.assertEqual(self.engine.evaluate(), (2 - 4) * 10 + 6 * 16 + 5)
+        self.engine.set_option("wall_cap", 1)
+        # Far from the goal the cap changes nothing (8 steps each: up to 9 walls count).
+        self.engine.set_position("position 0 8 4 0 4 8 7")
+        self.assertEqual(self.engine.evaluate(), 0 * 10 + 1 * 16 + 5)
+
     def test_decided_race(self):
         board = Board()
         board.pawns = [(3, 0), (2, 8)]  # 3 vs 6 steps, pawns far apart, nobody has walls

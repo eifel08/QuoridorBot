@@ -28,8 +28,9 @@ from typing import Optional
 
 import cv2
 
-from ..bots.cpp_engine import WALL_MODES, engine_available, wall_filter_from_name
-from ..bots.factory import BotSpec
+from ..bots.catalog import Param, bot_choices, choice_index, description, params_for, value_of, with_value
+from ..bots.cpp_engine import WALL_MODES, engine_available
+from ..bots.factory import BotSpec, parse_bot_spec
 from ..moves import PawnMove
 from .analysis import DEFAULT_SPEC, Analysis, Analyzer
 from .capture import Frame, ScreenWatcher
@@ -43,6 +44,9 @@ MARK = "#ff3df2"           # move marker: magenta, a hue the parser reads neithe
 KEY = "#010203"            # transparent colour of the Windows overlay
 TIME_CHOICES = ("0.25", "0.5", "1", "2", "3", "5", "10")
 WALL_LABELS = {name: label for name, _, label in WALL_MODES}
+CUSTOM_LABEL = "Custom spec..."
+#: Widgets whose own mouse-wheel binding would change their value: the wheel scrolls the panel instead.
+WHEEL_CLASSES = ("TCombobox", "TSpinbox", "Spinbox", "Scale", "Listbox")
 
 
 # ---------------------------------------------------------------------- #
@@ -202,6 +206,8 @@ class AssistantApp:
         self.root.attributes("-topmost", True)
         self.root.geometry("+24+72")
         self.root.protocol("WM_DELETE_WINDOW", self.close)
+        # Everything goes into a scrollable body, so the panel fits any screen height.
+        self.body = self._scrollable(self.root)
 
         self._lock = threading.Lock()
         self._analysis: Optional[Analysis] = None
@@ -242,10 +248,58 @@ class AssistantApp:
         return tk.Label(parent, text=text, fg=fg, bg=parent["bg"], font=("Segoe UI", size, "bold" if bold else "normal"),
                         anchor="w", justify="left", **kw)
 
+    def _scrollable(self, root: tk.Tk) -> tk.Frame:
+        """A frame inside a canvas with a vertical scrollbar; the mouse wheel scrolls it anywhere in ``root``."""
+        canvas = tk.Canvas(root, bg=BG, highlightthickness=0, borderwidth=0)
+        bar = ttk.Scrollbar(root, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        body = tk.Frame(canvas, bg=BG)
+        item = canvas.create_window((0, 0), window=body, anchor="nw")
+        self.canvas, self.scrollbar = canvas, bar
+
+        def fit(_event=None) -> None:
+            canvas.configure(scrollregion=(0, 0, body.winfo_reqwidth(), body.winfo_reqheight()))
+            # as tall as the content, but never taller than the screen (minus taskbar and title bar)
+            height = min(body.winfo_reqheight(), max(240, root.winfo_screenheight() - 160))
+            if int(canvas.cget("width")) != body.winfo_reqwidth() or int(canvas.cget("height")) != height:
+                canvas.configure(width=body.winfo_reqwidth(), height=height)
+
+        body.bind("<Configure>", fit)
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(item, width=max(e.width, body.winfo_reqwidth())))
+
+        def wheel(event) -> str:
+            widget = event.widget
+            try:
+                if isinstance(widget, str) or widget.winfo_toplevel() is not root:
+                    return ""
+            except (KeyError, tk.TclError):  # e.g. a combobox's drop-down list
+                return ""
+            if body.winfo_reqheight() <= canvas.winfo_height():
+                return "break"
+            if getattr(event, "num", None) in (4, 5):        # X11
+                step = -1 if event.num == 4 else 1
+            elif sys.platform == "darwin":                   # small deltas on macOS
+                step = -1 if event.delta > 0 else 1
+            else:                                            # Windows: multiples of 120
+                step = -max(1, abs(event.delta) // 120) if event.delta > 0 else max(1, abs(event.delta) // 120)
+            canvas.yview_scroll(step * 2, "units")
+            return "break"
+
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            root.bind_all(seq, wheel, add="+")
+            for cls in WHEEL_CLASSES:
+                root.bind_class(cls, seq, wheel)
+        self._wheel = wheel
+        return body
+
     def _build(self, debug: bool, overlay: bool) -> None:
-        root = self.root
+        root = self.body
         pad = dict(padx=12, pady=(8, 0))
         self._build_header()
+        if self.AUTOPLAY:  # choose the bot before starting: right under the auto-play controls
+            self._build_bot_box(root)
         self.status = self._label(root, "Looking for a Quoridor board...", WARN, 10, True, wraplength=300)
         self.status.pack(fill="x", **pad)
 
@@ -286,41 +340,20 @@ class AssistantApp:
         self.warn_label = self._label(root, "", WARN, 9, wraplength=300)
         self.warn_label.pack(fill="x", padx=12)
 
-        # bot settings
-        box = tk.Frame(root, bg=CARD)
-        if self.AUTOPLAY:  # folded away, so the panel fits on a 1080-pixel screen
-            def toggle() -> None:
-                if box.winfo_ismapped():
-                    box.pack_forget()
-                    fold.config(text="Bot settings ▸")
-                else:
-                    box.pack(fill="x", padx=12, pady=(0, 10))
-                    fold.config(text="Bot settings ▾")
+        # the bot: ranked list (strongest first) and its settings right below it
+        if not self.AUTOPLAY:
+            self._build_bot_box(root)
 
-            fold = tk.Button(root, text="Bot settings ▸", command=toggle, bg=BG, fg=DIM, activebackground=CARD,
-                             activeforeground=TEXT, relief="flat", anchor="w")
-            fold.pack(fill="x", padx=12, pady=(8, 2))
-        else:
-            box.pack(fill="x", padx=12, pady=10)
-        self.depth_var = tk.StringVar(value=str(self.spec.depth))
-        self.time_var = tk.StringVar(value=f"{self.spec.time_limit:g}" if self.spec.time_limit else "no limit")
-        wall_name = next((n for n, v, _ in WALL_MODES if v == self.spec.wall_filter), "both")
-        self.walls_var = tk.StringVar(value=WALL_LABELS[wall_name])
-        self.engine_var = tk.StringVar(value={"auto": "Auto", "cpp": "C++", "py": "Python"}[self.spec.engine])
+        # screen reading settings
+        box = tk.Frame(root, bg=CARD)
+        box.pack(fill="x", padx=12, pady=(0, 10))
+        self._label(box, "SCREEN", DIM, 9, True).grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(8, 0))
         self.advise_var = tk.StringVar(value="Both sides")
         self.turn_var = tk.StringVar(value="Auto")
         self.side_var = tk.StringVar(value="Auto")
         self.overlay_var = tk.BooleanVar(value=overlay)
         self.debug_var = tk.BooleanVar(value=debug)
-        rows = [("Depth", ttk.Spinbox(box, from_=1, to=30, width=8, textvariable=self.depth_var,
-                                      command=self._apply_spec)),
-                ("Think time (s)", ttk.Combobox(box, width=8, textvariable=self.time_var,
-                                                values=(*TIME_CHOICES, "no limit"))),
-                ("Walls searched", ttk.Combobox(box, width=16, textvariable=self.walls_var, state="readonly",
-                                                values=[label for _, _, label in WALL_MODES])),
-                ("Engine", ttk.Combobox(box, width=8, textvariable=self.engine_var, state="readonly",
-                                        values=("Auto", "C++", "Python"))),
-                ("Show move for", ttk.Combobox(box, width=10, textvariable=self.advise_var, state="readonly",
+        rows = [("Show move for", ttk.Combobox(box, width=10, textvariable=self.advise_var, state="readonly",
                                                values=("Both sides", "Red", "Blue"))),
                 ("Side to move", ttk.Combobox(box, width=10, textvariable=self.turn_var, state="readonly",
                                               values=("Auto", "Red", "Blue"))),
@@ -328,16 +361,10 @@ class AssistantApp:
                                                values=("Auto", "Bottom", "Top")))]
         if self.AUTOPLAY:
             rows = [row for row in rows if row[0] not in ("Show move for", "Side to move")]
-        if self.spec.kind != "ab":
-            rows = rows[4:]
-            self._label(box, f"Bot: {self.spec.label()}", DIM, 9).grid(row=0, column=0, columnspan=2, sticky="w",
-                                                                    padx=10, pady=(8, 0))
         for i, (text, widget) in enumerate(rows, start=1):
             self._label(box, text, DIM, 9).grid(row=i, column=0, sticky="w", padx=10, pady=3)
             widget.grid(row=i, column=1, sticky="e", padx=10, pady=3)
-            widget.bind("<<ComboboxSelected>>", self._apply_spec)
-            widget.bind("<Return>", self._apply_spec)
-            widget.bind("<FocusOut>", self._apply_spec)
+            widget.bind("<<ComboboxSelected>>", self._apply_screen)
         box.columnconfigure(1, weight=1)
         n = len(rows) + 1
         checks = [("Mark the move on the board", self.overlay_var), ("Debug / calibration preview", self.debug_var)]
@@ -351,32 +378,169 @@ class AssistantApp:
         if debug:
             self._toggle_preview()
 
-    def _build_header(self) -> None:
-        """Extra widgets above the status line (used by Auto-Play)."""
+    # -- the bot selector and its settings ------------------------------------------
+    def _build_bot_box(self, parent: tk.Misc) -> None:
+        box = tk.Frame(parent, bg=CARD)
+        box.pack(fill="x", padx=12, pady=10)
+        self._label(box, "BOT (strongest first)", DIM, 9, True).pack(fill="x", padx=10, pady=(8, 0))
+        self.bot_var = tk.StringVar()
+        self.bot_box = ttk.Combobox(box, width=40, textvariable=self.bot_var, state="readonly")
+        self.bot_box.pack(fill="x", padx=10, pady=(4, 0))
+        self.bot_box.bind("<<ComboboxSelected>>", self._on_bot_selected)
+        self._bot_row = self.bot_box
+        self.bot_desc = self._label(box, "", DIM, 9, wraplength=290)
+        self.bot_desc.pack(fill="x", padx=10)
+        self.custom_row = tk.Frame(box, bg=CARD)
+        self.custom_var = tk.StringVar(value=self.spec.to_string())
+        entry = tk.Entry(self.custom_row, textvariable=self.custom_var, bg=BG, fg=TEXT, insertbackground=TEXT,
+                         relief="flat", font=("Consolas", 9))
+        entry.pack(side="left", fill="x", expand=True)
+        entry.bind("<Return>", lambda _e: self._apply_custom())
+        tk.Button(self.custom_row, text="Use", command=self._apply_custom, bg=BG, fg=TEXT, activebackground=CARD,
+                  activeforeground=TEXT, relief="flat").pack(side="right", padx=(6, 0))
+        self.param_frame = tk.Frame(box, bg=CARD)
+        self.param_frame.pack(fill="x", padx=4, pady=(4, 0))
+        self.bot_info = self._label(box, "", DIM, 9, wraplength=290)
+        self.bot_info.pack(fill="x", padx=10, pady=(2, 8))
+        self._param_vars: dict[str, tk.Variable] = {}
+        self._param_after: Optional[str] = None
+        self._refresh_bot_box(rebuild=True)
 
-    # -- settings -----------------------------------------------------------------
-    def _apply_spec(self, _event=None) -> None:
-        forced = {"Auto": None, "Red": RED, "Blue": BLUE}[self.turn_var.get()]
-        if forced != self.tracker.forced_turn:
-            self.tracker.forced_turn = forced
-        self.tracker.forced_flipped = {"Auto": None, "Bottom": False, "Top": True}[self.side_var.get()]
-        if self.spec.kind != "ab":
+    def _bot_choices(self) -> list[tuple[str, BotSpec]]:
+        t = self.spec.time_limit if self.spec.kind in ("ab", "profile") else 1.0
+        return bot_choices(self.spec, t)
+
+    def _refresh_bot_box(self, rebuild: bool) -> None:
+        """Show ``self.spec`` in the selector (and rebuild its settings when the bot changed)."""
+        choices = self._bot_choices()
+        self.bot_box.config(values=[label for label, _ in choices] + [CUSTOM_LABEL])
+        if self.bot_var.get() != CUSTOM_LABEL or rebuild:
+            self.bot_var.set(choices[choice_index(self.spec, choices)][0])
+        self.bot_desc.config(text=description(self.spec.model) if self.spec.kind == "profile" else self.spec.label())
+        if rebuild:
+            self._build_params()
+
+    def _build_params(self) -> None:
+        """One control per setting of the selected bot: slider, buttons / list, or on-off switch."""
+        frame = self.param_frame
+        for child in frame.winfo_children():
+            child.destroy()
+        self._param_vars = {}
+        params = params_for(self.spec)
+        if not params:
+            self._label(frame, f"{self.spec.label()} (no settings)", DIM, 9).grid(row=0, column=0, sticky="w", padx=6)
+        for i, p in enumerate(params):
+            value = value_of(self.spec, p)
+            self._label(frame, p.label, DIM, 9).grid(row=i, column=0, sticky="w", padx=6, pady=2)
+            widget = self._param_widget(frame, p, value)
+            widget.grid(row=i, column=1, sticky="e", padx=6, pady=2)
+            self._tooltip(widget, p.hint)
+        frame.columnconfigure(1, weight=1)
+
+    def _param_widget(self, frame: tk.Misc, p: Param, value) -> tk.Widget:
+        style = dict(bg=CARD, fg=TEXT, activebackground=CARD, activeforeground=TEXT, highlightthickness=0)
+        if p.kind == "range":
+            var: tk.Variable = tk.IntVar(value=int(value))
+            widget = tk.Scale(frame, from_=p.lo, to=p.hi, orient="horizontal", resolution=1, variable=var,
+                              length=150, showvalue=True, troughcolor=BG, sliderlength=16, bd=0,
+                              command=lambda _v, p=p: self._param_changed(p, delay=250), bg=CARD, fg=TEXT,
+                              activebackground=CARD, highlightthickness=0)
+        elif p.kind == "toggle":
+            var = tk.BooleanVar(value=bool(value))
+            widget = tk.Checkbutton(frame, text="on", variable=var, selectcolor=BG,
+                                    command=lambda p=p: self._param_changed(p), **style)
+        elif len(p.values) <= 4:  # a few options: buttons side by side
+            var = tk.StringVar(value=p.text(value))
+            widget = tk.Frame(frame, bg=CARD)
+            for label in p.labels:
+                tk.Radiobutton(widget, text=label, value=label, variable=var, indicatoron=False, bg=BG, fg=TEXT,
+                               selectcolor="#3b4260", activebackground=CARD, activeforeground=TEXT,
+                               relief="flat", padx=6, pady=1, font=("Segoe UI", 8),
+                               command=lambda p=p: self._param_changed(p)).pack(side="left", padx=1)
+        else:  # many options: a list
+            var = tk.StringVar(value=p.text(value))
+            widget = ttk.Combobox(frame, width=9, textvariable=var, state="readonly", values=list(p.labels))
+            widget.bind("<<ComboboxSelected>>", lambda _e, p=p: self._param_changed(p))
+        self._param_vars[p.key] = var
+        return widget
+
+    def _tooltip(self, widget: tk.Widget, text: str) -> None:
+        """The setting's help in the info line under the controls while the mouse is over it."""
+        if not text:
             return
+        widget.bind("<Enter>", lambda _e: self.bot_info.config(text=text, fg=DIM), add="+")
+        for child in widget.winfo_children():
+            child.bind("<Enter>", lambda _e: self.bot_info.config(text=text, fg=DIM), add="+")
+
+    def _param_value(self, p: Param):
+        var = self._param_vars[p.key]
+        if p.kind == "range":
+            return int(var.get())
+        if p.kind == "toggle":
+            return bool(var.get())
+        return p.values[p.labels.index(var.get())]
+
+    def _param_changed(self, p: Param, delay: int = 0) -> None:
+        """A control changed: (after ``delay`` ms, so a slider drag restarts the search once) use the new spec."""
+        if self._param_after is not None:
+            self.root.after_cancel(self._param_after)
+            self._param_after = None
+
+        def apply() -> None:
+            self._param_after = None
+            if p.key in self._param_vars:
+                self.select_bot(with_value(self.spec, p, self._param_value(p)), rebuild=False)
+
+        if delay:
+            self._param_after = self.root.after(delay, apply)
+        else:
+            apply()
+
+    def _on_bot_selected(self, _event=None) -> None:
+        label = self.bot_var.get()
+        if label == CUSTOM_LABEL:
+            self.custom_var.set(self.spec.to_string())
+            self.custom_row.pack(fill="x", padx=10, pady=(4, 0), after=self.bot_desc)
+            self.bot_info.config(text="Type a bot spec, e.g. profile:name=nnue,time=2,walls=attack, "
+                                      "ab:depth=30,time=2 or ml:model=best.pt, then press Enter.", fg=DIM)
+            return
+        self.custom_row.pack_forget()
+        spec = next((s for lbl, s in self._bot_choices() if lbl == label), None)
+        if spec is not None:
+            self.select_bot(spec)
+
+    def _apply_custom(self) -> None:
         try:
-            depth = max(1, min(30, int(self.depth_var.get())))
-            text = self.time_var.get().strip().lower()
-            limit = None if text in ("", "0", "no limit", "none") else max(0.05, float(text))
-        except ValueError:
+            spec = parse_bot_spec(self.custom_var.get())
+        except ValueError as exc:
+            self.bot_info.config(text=str(exc), fg=RED_HEX)
             return
-        engine = {"Auto": "auto", "C++": "cpp", "Python": "py"}[self.engine_var.get()]
-        if engine == "cpp" and not engine_available():
-            engine = "auto"
-            self.engine_var.set("Auto")
-        wall_name = next(n for n, label in WALL_LABELS.items() if label == self.walls_var.get())
-        spec = replace(self.spec, depth=depth, time_limit=limit, engine=engine)
-        spec = spec.with_wall_filter(wall_filter_from_name(wall_name))
-        if engine == "py":
-            spec = replace(spec, options=())  # engine flags only exist in the C++ engine
+        self.custom_row.pack_forget()
+        self.select_bot(spec)
+
+    def _spec_problem(self, spec: BotSpec) -> Optional[str]:
+        """Why ``spec`` cannot be used here, or None."""
+        if spec.kind in ("profile",) or (spec.kind == "ab" and spec.engine == "cpp"):
+            if not engine_available():
+                return "The C++ engine is not built (python build_engine.py)."
+        if spec.kind == "ml":
+            try:
+                import torch  # noqa: F401
+            except Exception:
+                return "ML bots need PyTorch (pip install -r requirements-ml.txt)."
+        return None
+
+    def select_bot(self, spec: BotSpec, rebuild: bool = True) -> bool:
+        """Make ``spec`` the bot that analyses (and, in Auto-Play, plays). False (with the reason) if it can't."""
+        problem = self._spec_problem(spec)
+        if problem:
+            self.bot_info.config(text=problem, fg=RED_HEX)
+            return False
+        self._use_spec(spec, rebuild)
+        return True
+
+    def _use_spec(self, spec: BotSpec, rebuild: bool = True) -> None:
+        changed_bot = (spec.kind, spec.model) != (self.spec.kind, self.spec.model)
         if spec != self.spec:
             self.spec = spec
             current = self.tracker.current
@@ -385,6 +549,18 @@ class AssistantApp:
                 self._searching = current if (current and current.turn is not None
                                               and current.winner is None) else None
             self.analyzer.set_spec(spec, current)
+        self._refresh_bot_box(rebuild or changed_bot)
+        self.bot_info.config(text=f"Spec: {spec.to_string()}", fg=DIM)
+
+    def _build_header(self) -> None:
+        """Extra widgets above the status line (used by Auto-Play)."""
+
+    # -- settings -----------------------------------------------------------------
+    def _apply_screen(self, _event=None) -> None:
+        forced = {"Auto": None, "Red": RED, "Blue": BLUE}[self.turn_var.get()]
+        if forced != self.tracker.forced_turn:
+            self.tracker.forced_turn = forced
+        self.tracker.forced_flipped = {"Auto": None, "Bottom": False, "Top": True}[self.side_var.get()]
 
     def _rescan(self) -> None:
         with self._lock:
@@ -413,7 +589,7 @@ class AssistantApp:
         if self._closed:
             return
         try:
-            self._apply_spec()
+            self._apply_screen()
             self._refresh()
         finally:
             self.root.after(120, self._tick)
@@ -621,6 +797,8 @@ class AssistantApp:
         self._closed = True
         self.watcher.stop()
         self.analyzer.close()
+        if self.watcher.is_alive():  # let a capture / OpenCV call finish before the interpreter exits
+            self.watcher.join(timeout=2.0)
         self.overlay.hide()
         self.root.destroy()
 

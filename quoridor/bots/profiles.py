@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import random
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
 
 from .alphabeta import FastBoard
 from .cpp_engine import ENGINE_DIR, CppEngine, EngineError, fastboard_command, parse_move, to_imove
@@ -46,6 +46,17 @@ def engine_binary(name: str) -> Path:
     import os
     exe = name + (".exe" if os.name == "nt" else "")
     return BUILD_DIR / exe
+
+
+def _fallback_binary(missing: Path) -> Path:
+    """The main engine built by ``python build_engine.py`` (any build folder) if ``missing`` is it."""
+    from .cpp_engine import EXE_NAME, find_engine
+
+    if missing.name == EXE_NAME:
+        found = find_engine()
+        if found:
+            return Path(found)
+    raise EngineError(f"{missing} not built (python build_engine.py, or make -C engine && make -C engine baseline)")
 
 
 # ---------------------------------------------------------------------- #
@@ -125,18 +136,32 @@ def shared_book() -> OpeningBook:
     return _BOOK
 
 
-class ProfileEngine:
-    """One engine process configured as a profile. ``go(board, time)`` -> (move text, info)."""
+def profile_options(name: str, overrides: Optional[Mapping[str, int]] = None) -> dict[str, int]:
+    """The engine options of a profile, with ``overrides`` (e.g. from the GUI) on top."""
+    return {**PROFILES[name]["options"], **dict(overrides or {})}
 
-    def __init__(self, name: str, seed: int = 0) -> None:
+
+def profile_uses_book(name: str) -> bool:
+    return bool(PROFILES[name].get("book"))
+
+
+class ProfileEngine:
+    """One engine process configured as a profile. ``go(board, time)`` -> (move text, info).
+
+    ``options`` override the profile's engine options; ``book`` turns the opening book on or
+    off (None = the profile's default).
+    """
+
+    def __init__(self, name: str, seed: int = 0, options: Optional[Mapping[str, int]] = None,
+                 book: Optional[bool] = None) -> None:
         if name not in PROFILES:
             raise EngineError(f"unknown profile '{name}' (known: {', '.join(PROFILES)})")
         self.name = name
         prof = PROFILES[name]
         binary = engine_binary(prof.get("binary", "quoridor_engine"))
         if not binary.is_file():
-            raise EngineError(f"{binary} not built (make -C engine && make -C engine baseline)")
-        self.engine = CppEngine(str(binary), prof["options"])
+            binary = _fallback_binary(binary)
+        self.engine = CppEngine(str(binary), profile_options(name, options))
         if prof.get("linear"):
             if not LINEAR_WEIGHTS.is_file():
                 raise EngineError(f"{LINEAR_WEIGHTS} missing (python -m tools.texel_tune)")
@@ -145,7 +170,8 @@ class ProfileEngine:
             if not NET_PATH.is_file():
                 raise EngineError(f"{NET_PATH} missing (python -m tools.train_nnue)")
             self.engine.command(f"loadnet {NET_PATH}")
-        self.book = shared_book() if prof.get("book") else None
+        use_book = prof.get("book", False) if book is None else book
+        self.book = shared_book() if use_book else None
         self.rng = random.Random(seed) if seed else None
 
     def new_game(self) -> None:
@@ -178,17 +204,21 @@ from .cpp_engine import CppBot  # noqa: E402
 class ProfileBot(CppBot):
     """A profile as a :class:`~quoridor.player.Player` (book move if any, else the engine)."""
 
-    def __init__(self, name: str, profile: str, time_limit: Optional[float] = 5.0, depth: int = 30) -> None:
+    def __init__(self, name: str, profile: str, time_limit: Optional[float] = 5.0, depth: int = 30,
+                 options: Optional[Mapping[str, int]] = None, book: Optional[bool] = None) -> None:
         if profile not in PROFILES:
             raise EngineError(f"unknown profile '{profile}' (known: {', '.join(PROFILES)})")
-        super().__init__(name, depth, time_limit, dict(PROFILES[profile]["options"]))
+        super().__init__(name, depth, time_limit, profile_options(profile, options))
         self.profile = profile
+        self.overrides = dict(options or {})
+        self.book_on = book
         self._pe: Optional[ProfileEngine] = None
 
     @property
     def engine(self) -> CppEngine:
         if self._pe is None:
-            self._pe = ProfileEngine(self.profile, seed=random.getrandbits(31) | 1)
+            self._pe = ProfileEngine(self.profile, seed=random.getrandbits(31) | 1, options=self.overrides,
+                                     book=self.book_on)
             self._engine = self._pe.engine
         return self._pe.engine
 

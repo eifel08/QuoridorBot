@@ -5,7 +5,7 @@ and reports an :class:`Analysis`: the bot's best move with its backed-up
 search score (``+1.5`` / ``M3`` / ``-M5``, see :mod:`quoridor.evaluation`) and
 a few alternative moves, each with the reply the engine expects.
 
-Any bot spec works (``ab:depth=30,time=1``, ``ab:depth=8,walls=attack``,
+Any bot spec works (``profile:name=hybrid,time=1`` (the default), ``ab:depth=30,time=1``, ``ab:depth=8,walls=attack``,
 ``ab:depth=4,engine=py``, ``ml:model=best.pt``). The spec can be changed while
 running. A new position cancels the search of the previous one.
 """
@@ -22,7 +22,8 @@ from ..evaluation import Eval
 from ..moves import Move, PawnMove
 from .position import Position, move_notation
 
-DEFAULT_SPEC = BotSpec(depth=30, time_limit=1.0)
+#: The strongest bot of the tournaments (quoridor.bots.catalog), 1 s per position.
+DEFAULT_SPEC = BotSpec("profile", depth=30, time_limit=1.0, model="hybrid")
 MAX_ALTERNATIVES = 3
 
 
@@ -169,7 +170,7 @@ class Analyzer:
         if self._stale(generation):
             return
         self._on_result(replace(analysis, lines=list(analysis.lines)))
-        if spec.kind != "ab" or self.alternatives <= 0:
+        if spec.kind not in ("ab", "profile") or self.alternatives <= 0:
             analysis.complete = True
             self._on_result(analysis)
             return
@@ -178,7 +179,8 @@ class Analyzer:
         # smaller budget; the score for the opponent, negated, rates the move.
         candidates = self._candidates(state, bot, move)
         budget = max(0.05, (spec.time_limit or 2.0) / max(1, len(candidates) + 1) * 0.6)
-        child_spec = replace(spec, depth=max(1, spec.depth - 1), time_limit=budget, random_ties=False)
+        child_spec = replace(spec, depth=max(1, spec.depth - 1), time_limit=budget, random_ties=False,
+                             book=False if spec.kind == "profile" else spec.book)  # book moves have no score
         child_bot = self._bot("child", child_spec)
         lines = []
         for cand in [move, *candidates]:
@@ -229,4 +231,8 @@ class Analyzer:
 def _engine_name(spec: BotSpec, info: dict) -> str:
     if spec.kind == "ml":
         return "ML agent"
+    if spec.kind == "profile":
+        from ..bots.catalog import title
+
+        return f"{title(spec.model)} · " + ("opening book" if info.get("book") else "C++ engine")
     return "C++ engine" if info.get("engine") == "cpp" else "Python search"

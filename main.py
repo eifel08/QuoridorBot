@@ -40,9 +40,14 @@ def main() -> None:
     parser.add_argument("--mode", choices=["human", "bot", "bots"],
                         help="skip the menu: 'human' = Human vs Human, 'bot' = Human vs Bot, "
                              "'bots' = Bot vs Bot")
-    parser.add_argument("--depth", type=int, default=4, help="bot search depth 1-30 (default 4)")
-    parser.add_argument("--time-limit", type=float, default=5.0,
-                        help="bot think time per move in seconds, 0 = no limit (default 5)")
+    parser.add_argument("--bot", metavar="SPEC",
+                        help="Human vs Bot opponent, e.g. profile:name=nnue,time=3 or ab:depth=8 (default "
+                             "profile:name=hybrid,time=5, the strongest bot)")
+    parser.add_argument("--depth", type=int, default=None,
+                        help="Human vs Bot / --cli: a plain alpha-beta bot with this search depth 1-30 "
+                             "(CLI default 4)")
+    parser.add_argument("--time-limit", type=float, default=None,
+                        help="with --depth: think time per move in seconds, 0 = no limit (default 5)")
     parser.add_argument("--engine", choices=["auto", "cpp", "py"], default=None,
                         help="bot search engine: C++ (engine/, must be built), pure Python, or auto = "
                              "C++ if built (default)")
@@ -72,7 +77,7 @@ def main() -> None:
     parser.add_argument("--assistant", nargs="?", const="", metavar="BOT",
                         help="Screen Assistant: watch the screen for a Quoridor game and show the best move and "
                              "eval. Optional bot spec, e.g. --assistant ab:depth=8,time=3,walls=attack "
-                             "(default ab:depth=30,time=1)")
+                             "(default profile:name=hybrid,time=1)")
     parser.add_argument("--assistant-demo", nargs="?", const="classic", choices=["classic", "timed"],
                         help="Screen Assistant plus a self-playing mock game to try it on: 'classic' (green "
                              "border on the active card) or 'timed' (online layout with clocks, move list and "
@@ -83,7 +88,7 @@ def main() -> None:
     parser.add_argument("--autoplay", nargs="?", const="", metavar="BOT",
                         help="Auto-Play: like --assistant, but the bot also plays the bottom player's moves with "
                              "the mouse. Starts switched off; Esc or the mouse in a screen corner stops it. "
-                             "Optional bot spec (default ab:depth=30,time=1)")
+                             "Optional bot spec (default profile:name=hybrid,time=1)")
     parser.add_argument("--autoplay-demo", nargs="?", const="red", choices=["red", "blue"],
                         help="Auto-Play plus a clickable mock game to try it on, with the bot as Red (moves first) "
                              "or Blue")
@@ -111,6 +116,10 @@ def main() -> None:
     args, extra = parser.parse_known_args()
     if extra and not args.headless:
         parser.error(f"unrecognized arguments: {' '.join(extra)}")
+    legacy_bot = args.depth is not None or args.time_limit is not None
+    args.depth = 4 if args.depth is None else args.depth
+    if args.time_limit is None:
+        args.time_limit = 5.0
     if not 1 <= args.depth <= 30:
         parser.error("--depth must be between 1 and 30")
     if args.engine:
@@ -128,11 +137,13 @@ def main() -> None:
 
         botmatch(["--bot1", args.bot1 or "ab:depth=2", "--bot2", args.bot2 or "ab:depth=4", *extra])
         return
-    from quoridor.bots import BotSpec, parse_bot_spec
+    from quoridor.bots import parse_bot_spec
+    from quoridor.bots.catalog import default_spec
 
     try:
-        specs = (parse_bot_spec(args.bot1) if args.bot1 else BotSpec(depth=2),
-                 parse_bot_spec(args.bot2) if args.bot2 else BotSpec(depth=4))
+        specs = (parse_bot_spec(args.bot1) if args.bot1 else default_spec("hybrid", 1.0),
+                 parse_bot_spec(args.bot2) if args.bot2 else default_spec("nnue", 1.0))
+        opponent = parse_bot_spec(args.bot) if args.bot else default_spec("hybrid", 5.0)
     except ValueError as exc:
         parser.error(str(exc))
     wall_filter = None
@@ -141,7 +152,10 @@ def main() -> None:
 
         wall_filter = wall_filter_from_name(args.walls)
         specs = tuple(sp.with_wall_filter(wall_filter)
-                      if sp.kind == "ab" and "wall_filter" not in dict(sp.options) else sp for sp in specs)
+                      if sp.kind in ("ab", "profile") and "wall_filter" not in dict(sp.options) else sp
+                      for sp in specs)
+        if opponent.kind in ("ab", "profile") and "wall_filter" not in dict(opponent.options):
+            opponent = opponent.with_wall_filter(wall_filter)
 
     if args.web:
         serve_web(args.port, open_browser=not args.no_browser)
@@ -153,8 +167,8 @@ def main() -> None:
         try:
             from quoridor.vision import run_autoplay
 
-            spec = parse_bot_spec(args.autoplay) if args.autoplay else BotSpec(depth=30, time_limit=1.0)
-            if wall_filter is not None and spec.kind == "ab" and "wall_filter" not in dict(spec.options):
+            spec = parse_bot_spec(args.autoplay) if args.autoplay else default_spec("hybrid", 1.0)
+            if wall_filter is not None and spec.kind in ("ab", "profile") and "wall_filter" not in dict(spec.options):
                 spec = spec.with_wall_filter(wall_filter)
             run_autoplay(spec, args.monitor, args.scan_fps, args.vision_profile, args.debug_preview,
                          args.click_profile, args.join, demo=args.autoplay_demo, armed=args.armed,
@@ -175,8 +189,8 @@ def main() -> None:
                 sys.exit(0 if check_image(args.assistant_image, profile_path=args.vision_profile) else 1)
             from quoridor.vision import run_assistant
 
-            spec = parse_bot_spec(args.assistant) if args.assistant else BotSpec(depth=30, time_limit=1.0)
-            if wall_filter is not None and spec.kind == "ab" and "wall_filter" not in dict(spec.options):
+            spec = parse_bot_spec(args.assistant) if args.assistant else default_spec("hybrid", 1.0)
+            if wall_filter is not None and spec.kind in ("ab", "profile") and "wall_filter" not in dict(spec.options):
                 spec = spec.with_wall_filter(wall_filter)
             run_assistant(spec, args.monitor, args.scan_fps, args.vision_profile, args.debug_preview,
                           not args.no_overlay, demo=args.assistant_demo)
@@ -202,7 +216,8 @@ def main() -> None:
 
     menu_mode = mode or ("bvb" if args.bot1 or args.bot2 else "hvh")
     settings = MatchSettings(menu_mode, args.depth, time_limit, args.play_as - 1, args.ml_model, args.ml_sims,
-                             bots=specs, move_delay=args.delay)
+                             bots=specs, move_delay=args.delay,
+                             bot=None if legacy_bot and not args.bot else opponent)
     if wall_filter is not None:
         settings.wall_filter = wall_filter
     if args.eval or args.eval_engine:

@@ -13,6 +13,11 @@ Spec syntax (used by ``main.py --bot1/--bot2`` and ``python -m quoridor.botmatch
     ab:depth=4,engine=py    force the pure-Python search (``engine=cpp`` forces the C++ one)
     ml:model=best.pt        trained ML agent (needs PyTorch), 64 MCTS simulations
     ml:model=best.pt,sims=0 ML agent playing its raw policy (fast)
+    profile:name=hybrid,time=5
+                            a tournament bot profile (quoridor.bots.profiles): hybrid, nnue, tuned,
+                            turbo, book or baseline. Also takes depth=, walls=, book=0/1 and any
+                            engine flag (e.g. lmr=0, hash_mb=256), which override the profile;
+                            time=0 = no time limit
 
 ``alphabeta`` may be written instead of ``ab``. Unknown keys are rejected so typos
 don't go unnoticed.
@@ -46,7 +51,8 @@ class BotSpec:
     model: Optional[str] = None        # ml: checkpoint path
     sims: int = 64                     # ml: MCTS simulations per move
     engine: str = "auto"               # alpha-beta: "auto" (C++ if built), "cpp" or "py"
-    options: tuple[tuple[str, int], ...] = ()  # alpha-beta: C++ engine flags, e.g. (("futility", 0),)
+    options: tuple[tuple[str, int], ...] = ()  # C++ engine flags, e.g. (("futility", 0),); profile: overrides
+    book: Optional[bool] = None        # profile: opening book on / off (None = the profile's default)
 
     @property
     def wall_filter(self) -> int:
@@ -63,9 +69,22 @@ class BotSpec:
     def uses_cpp(self) -> bool:
         return self.kind == "ab" and cpp_engine.resolve_engine(self.engine) == "cpp"
 
+    def with_option(self, key: str, value: Optional[int]) -> "BotSpec":
+        """This spec with engine flag ``key`` set to ``value`` (None removes it)."""
+        opts = {k: v for k, v in self.options if k != key}
+        if value is not None:
+            opts[key] = int(value)
+        order = list(DEFAULT_OPTIONS)
+        return replace(self, options=tuple(sorted(opts.items(), key=lambda kv: order.index(kv[0]))))
+
     def label(self) -> str:
         if self.kind == "profile":
-            return f"Profile {self.model}" + (f", {self.time_limit:g}s" if self.time_limit else "")
+            from .catalog import title
+
+            t = f", {self.time_limit:g}s" if self.time_limit else ", no time limit"
+            d = f", depth {self.depth}" if self.depth != MAX_DEPTH else ""
+            extra = " (custom)" if self.options or self.book is not None else ""
+            return f"{title(self.model)}{t}{d}{extra}"
         if self.kind == "ml":
             return f"ML ({self.sims} sims)"
         t = f", {self.time_limit:g}s" if self.time_limit else ""
@@ -74,7 +93,13 @@ class BotSpec:
 
     def to_string(self) -> str:
         if self.kind == "profile":
-            return f"profile:name={self.model}" + (f",time={self.time_limit:g}" if self.time_limit else "")
+            parts = [f"name={self.model}", f"time={self.time_limit:g}" if self.time_limit else "time=0"]
+            if self.depth != MAX_DEPTH:
+                parts.append(f"depth={self.depth}")
+            if self.book is not None:
+                parts.append(f"book={int(self.book)}")
+            parts += [f"{k}={v}" for k, v in self.options]
+            return "profile:" + ",".join(parts)
         if self.kind == "ml":
             return f"ml:model={self.model},sims={self.sims}"
         parts = [f"depth={self.depth}"]
@@ -104,13 +129,13 @@ def parse_bot_spec(text: str) -> BotSpec:
 
     if "filter" in opts:
         opts["wall_filter"] = opts.pop("filter")
-    if "walls" in opts and kind == "ab":
+    if "walls" in opts and kind in ("ab", "profile"):
         try:
             opts["wall_filter"] = str(wall_filter_from_name(opts.pop("walls")))
         except ValueError as exc:
             raise ValueError(f"bad bot spec '{text}': {exc}") from None
     allowed = {"ab": {"depth", "time", "random", "engine", *DEFAULT_OPTIONS}, "ml": {"model", "sims"},
-               "profile": {"name", "time"}}[kind]
+               "profile": {"name", "time", "depth", "book", *DEFAULT_OPTIONS}}[kind]
     unknown = set(opts) - allowed
     if unknown:
         raise ValueError(f"unknown option(s) for '{kind}': {', '.join(sorted(unknown))} "
@@ -134,7 +159,13 @@ def parse_bot_spec(text: str) -> BotSpec:
 
             if opts.get("name") not in PROFILES:
                 raise ValueError(f"name must be one of: {', '.join(PROFILES)}")
-            return BotSpec("profile", model=opts["name"], time_limit=float(opts.get("time", 5)) or None)
+            depth = int(opts.get("depth", MAX_DEPTH))
+            if not 1 <= depth <= MAX_DEPTH:
+                raise ValueError(f"depth must be 1-{MAX_DEPTH}")
+            book = None if "book" not in opts else opts["book"].lower() in ("1", "true", "yes", "on")
+            flags = tuple((k, int(opts[k])) for k in DEFAULT_OPTIONS if k in opts)
+            return BotSpec("profile", model=opts["name"], depth=depth,
+                           time_limit=float(opts.get("time", 5)) or None, options=flags, book=book)
         if "model" not in opts:
             raise ValueError("ml bots need model=PATH")
         return BotSpec("ml", model=opts["model"], sims=int(opts.get("sims", 64)))
@@ -148,7 +179,8 @@ def make_player(spec: BotSpec, name: Optional[str] = None) -> Player:
     if spec.kind == "profile":
         from .profiles import ProfileBot
 
-        return ProfileBot(name, spec.model, spec.time_limit)  # type: ignore[arg-type]
+        return ProfileBot(name, spec.model, spec.time_limit, spec.depth,  # type: ignore[arg-type]
+                          dict(spec.options), spec.book)
     if spec.kind == "ml":
         from ..ml.agent import MLPlayer
 
@@ -169,8 +201,9 @@ def make_policy(spec: BotSpec, seed: int = 0) -> Callable[[FastBoard], IMove]:
         def ppolicy(board: FastBoard) -> IMove:
             pe = pengines.get(os.getpid())
             if pe is None:
-                pe = pengines[os.getpid()] = ProfileEngine(spec.model, seed=seed or 1)  # type: ignore[arg-type]
-            text, _ = pe.go(board, spec.time_limit or 5.0)
+                pe = pengines[os.getpid()] = ProfileEngine(spec.model, seed=seed or 1,  # type: ignore[arg-type]
+                                                           options=dict(spec.options), book=spec.book)
+            text, _ = pe.go(board, spec.time_limit or 5.0, spec.depth)
             if text is None:
                 raise cpp_engine.EngineError("the engine found no legal move")
             return imove(text)

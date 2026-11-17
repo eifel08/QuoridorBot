@@ -6,7 +6,7 @@ from typing import Optional
 
 import pygame
 
-from ..bots import make_player, make_search_bot
+from ..bots import make_player
 from ..evaluation import EVAL_TIME_LIMIT, BackgroundEvaluator
 from ..game import Game
 from .app import QuoridorGUI, RestartGame
@@ -36,8 +36,8 @@ def build_players(settings: MatchSettings, gui: QuoridorGUI, names: tuple[str, s
 
         inner = MLPlayer(settings.ml_model, "ML agent", settings.ml_sims)
     else:
-        inner = make_search_bot(f"Bot (depth {settings.depth})", settings.depth, settings.time_limit,
-                                {"wall_filter": settings.wall_filter})
+        spec = settings.opponent()
+        inner = make_player(spec, f"Bot: {spec.label()}")
     bot_side = 1 - settings.human_side
     slots = [False, False]
     slots[bot_side] = settings.show_eval
@@ -77,9 +77,8 @@ def run_gui(name1: str = "Player 1", name2: str = "Player 2",
         gui.set_eval_display((False, False))  # stops the background evaluator
         pygame.quit()
     if assistant:
-        from ..bots import BotSpec
-
-        spec = BotSpec(depth=30, time_limit=1.0).with_wall_filter(settings.wall_filter)
+        # the bot chosen in the menu (with its settings) gives the hints / plays the moves
+        spec = settings.opponent()
         try:
             from ..vision import run_assistant, run_autoplay
 

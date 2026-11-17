@@ -49,6 +49,9 @@ DEFAULT_OPTIONS: dict[str, int] = {
     "wall_filter": 1, "decided": 1, "decided_margin": 1,
     "futility": 1, "wall_recovery": 5, "depth_margin": 5,
     "seed": 0, "hash_mb": 64,
+    # search upgrades and evaluation modes (bot profiles, quoridor.bots.profiles)
+    "smart_time": 0, "pvs": 0, "aspiration": 0, "lmr": 0, "lmr_min_moves": 3, "lmr_min_depth": 3,
+    "repetition": 0, "eval_mode": 0, "hybrid_walls": 6, "endgame_walls": -1,
 }
 
 

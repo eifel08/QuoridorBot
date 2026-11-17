@@ -52,15 +52,39 @@ Every front-end lets you pick the mode before a game:
 
 - **Human vs Human**: two people take turns on the same computer. On the desktop a bot can
   evaluate the position in the background (see [Eval display](#eval-display-desktop-window)).
-- **Human vs Bot**: you play against the alpha-beta bot. After each bot move, the depth it reached,
+### Choosing the bot (desktop window, Screen Assistant, Auto-Play)
+
+Wherever a bot is chosen (Human vs Bot, both bots of Bot vs Bot, the Screen Assistant's hints and
+Auto-Play) the same list is offered, **strongest first**, ranked by the round-robin tournaments in
+[docs/bot-evolution-report.md](docs/bot-evolution-report.md):
+
+| # | Bot | What it is | Elo vs the old engine (5 s/move) |
+|---|---|---|---|
+| 1 | **Hybrid** (default) | opening book, neural-network midgame, exact deep endgame | +222 |
+| 2 | **NNUE** | neural-network evaluation, fast search | +209 |
+| 3 | **Tuned** | Texel-tuned classic evaluation, fast search | +36 |
+| 4 | **Turbo** | fast search (PVS, LMR, smart time) with the classic evaluation | -20 |
+
+Right below the list are the selected bot's settings (sliders for numbers, buttons for choices,
+on / off switches; hover one for a short explanation): **search depth** (1-30), **think time**,
+**walls searched** (attack only / attack + defense / all), **opening book**, **late-move
+reductions**, **futility pruning** and the **hash table** size; the Hybrid also has **neural eval
+from N walls** (below that it switches to the tuned evaluation) and **exact endgame at N walls**
+(pruning off from there on, -1 = never). The settings are kept in the bot's spec, so the same bot
+can be given on the command line, e.g.
+`--bot profile:name=hybrid,time=3,walls=attack,book=0` (see [Bot settings](#bot-settings)).
+The Screen Assistant and Auto-Play panels scroll (scroll bar or mouse wheel), so every control is
+reachable on small screens.
+
+- **Human vs Bot**: you play against the chosen bot (Hybrid by default). After each bot move, the depth it reached,
   the number of positions it searched, the time it took and its evaluation are shown (under the board in
   the browser, in the side panel on the desktop, after the move in the terminal).
   In the browser, *Undo* takes back your move and the bot's reply.
 - **Bot vs Bot**: two bots with independent settings play each other while you watch, or run
   hundreds of games without a board. See the next section.
 
-Shortcuts: `python3 main.py --mode bot --depth 6 --time-limit 3 --play-as 2` skips the desktop menu
-(add `--cli` for the terminal). In the browser, `?mode=bot&depth=6` preselects the mode and depth.
+Shortcuts: `python3 main.py --mode bot --bot profile:name=nnue,time=3 --play-as 2` skips the desktop
+menu; `--depth 6 --time-limit 3` instead plays the plain alpha-beta bot (add `--cli` for the terminal). In the browser, `?mode=bot&depth=6` preselects the mode and depth.
 
 ## Eval display (desktop window)
 
@@ -328,16 +352,14 @@ The desktop start menu (`python main.py`) has its own **Auto-Play Mode** button 
 *Screen Assistant*. `--monitor`, `--scan-fps`, `--debug-preview` and `--vision-profile` work as
 for the assistant. Depth, think time, walls and engine can be changed in the panel.
 
-**Choosing the bot.** The **Bot** drop-down at the top of the panel picks which bot plays:
-*Standard* (C++, 1 s, the default), *Strong* (3 s), *Fast* (0.3 s), *Attack walls only*, *All
-walls*, *Classic eval* (the flat wall value from before the blockability evaluation), the Python
-alpha-beta bot, any trained ML checkpoint found under `runs/`, `checkpoints/`, `models/` or the
-current folder (when PyTorch is installed), or *Custom spec...*, which takes any
-[bot spec](#bot-settings) (e.g. `ab:depth=30,time=2,walls=attack` or `ml:model=best.pt`) and
-applies it on Enter. A spec given on the command line appears as the first entry. The switch takes
-effect at once; if the bot is in the middle of highlighting or clicking a move, the new bot takes
-over right after that move. The line under the drop-down shows the exact spec in use, and the
-folded *Bot settings* stay in sync with it. The presets are in `quoridor/bots/presets.py`.
+**Choosing the bot.** The **BOT** box right under the auto-play controls has the ranked list
+(Hybrid, NNUE, Tuned, Turbo; Hybrid at 1 s by default) with the selected bot's settings below it
+(see [Choosing the bot](#choosing-the-bot-desktop-window-screen-assistant-auto-play)), plus
+*Custom spec...*, which takes any [bot spec](#bot-settings) (e.g. `ab:depth=30,time=2,walls=attack`
+or `ml:model=best.pt`) and applies it on Enter. A spec given on the command line is kept in the
+list. A change takes effect at once; if the bot is in the middle of highlighting or clicking a
+move, the new bot takes over right after that move. The line under the settings shows the exact
+spec in use.
 
 **It starts switched off.** Open the game so that the start position is visible, then press
 **Start auto-play** in the panel (`--armed` presses it at launch). The button turns into a red
@@ -511,12 +533,12 @@ statistics.
 
 `?mode=bots&red=2&blue=5` in the URL preselects the mode and both depths.
 
-**Desktop window**: `python3 main.py`, then *Bot vs Bot* in the menu. Each bot has its own depth
-slider and think-time buttons, and there's a choice of pause between moves. While a game runs:
+**Desktop window**: `python3 main.py`, then *Bot vs Bot* in the menu. Each bot has its own ranked
+bot list (Hybrid vs NNUE at 1 s by default) and settings, and there's a choice of pause between moves. While a game runs:
 Space pauses or resumes, R goes back to the menu. To skip the menu:
 
 ```bash
-python3 main.py --mode bots --bot1 ab:depth=2 --bot2 ab:depth=4 --delay 0.5
+python3 main.py --mode bots --bot1 profile:name=hybrid,time=1 --bot2 profile:name=nnue,time=1 --delay 0.5
 ```
 
 **Terminal**: `python3 main.py --cli`, choose `3`, or add the same flags with `--cli`. The board
@@ -565,6 +587,8 @@ Bot 2   ab:depth=4                            67   67.0%   57.3%   76.0%    58.0
 | `ab:depth=4,engine=py` | force the Python search (`engine=cpp` forces C++; default: C++ if built) |
 | `ml:model=runs/exp1/best.pt` | trained ML agent (needs PyTorch), 64 MCTS simulations per move |
 | `ml:model=best.pt,sims=0` | ML agent playing its network's first choice without search (fast) |
+| `profile:name=hybrid,time=5` | a ranked tournament bot: `hybrid`, `nnue`, `tuned`, `turbo` (also `book`, `baseline`); `time=0` = no limit |
+| `profile:name=nnue,time=2,depth=12,walls=attack,book=1,lmr=0` | the same with settings changed: `depth`, `walls`, `book=0/1` and any engine flag (`futility`, `hash_mb`, `hybrid_walls`, `endgame_walls`, ...) |
 
 Example, checking a trained model against the bot it was trained on:
 
@@ -936,7 +960,9 @@ quoridor/
   bots/alphabeta.py    AlphaBetaBot: negamax alpha-beta search, heuristic, iterative deepening
   bots/cpp_engine.py   bridge to the C++ engine: CppEngine (process), CppBot (drop-in AlphaBetaBot)
   bots/factory.py      bot spec strings ("ab:depth=4", "ml:model=...") -> players / fast policies
-  bots/presets.py      named bot configurations for the Auto-Play bot selector
+  bots/presets.py      named bot configurations (older presets; spec strings)
+  bots/profiles.py     tournament bot profiles (engine options, tuned weights, NNUE, opening book)
+  bots/catalog.py      the ranked bots of every bot selector and their GUI settings
   botmatch.py          headless Bot vs Bot batch runner (parallel, statistics, JSON/CSV)
   ml/                  ML agent + training pipeline (PyTorch, see requirements-ml.txt)
     arena.py           fast game runner, seeded random openings, win-rate statistics

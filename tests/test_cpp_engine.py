@@ -454,11 +454,29 @@ class TestGuiEndToEnd(unittest.TestCase):
         from quoridor.gui import MatchSettings, QuoridorGUI, build_players
 
         gui = QuoridorGUI()
-        human, bot = build_players(MatchSettings("hvb", depth=6, time_limit=0.5, wall_filter=2), gui, ("A", "B"))
+        # --depth / --time-limit / --walls on the command line: the plain alpha-beta bot
+        human, bot = build_players(MatchSettings("hvb", depth=6, time_limit=0.5, wall_filter=2, bot=None), gui,
+                                   ("A", "B"))
         self.assertIsInstance(bot.bot, CppBot)
-        self.assertEqual(bot.bot.options, {"wall_filter": 2})  # the menu's wall choice reaches the engine
+        self.assertEqual(bot.bot.options, {"wall_filter": 2})  # the wall choice reaches the engine
         state = Board().snapshot(1)
         move = bot.get_move(state)  # runs the engine in the GUI's worker thread
+        self.assertIsNone(Board().move_error(1, move))
+        self.assertGreaterEqual(gui.bot_info["depth_reached"], 1)
+
+    def test_human_vs_ranked_bot_settings_reach_the_engine(self):
+        from quoridor.bots.catalog import WALLS, LMR, default_spec, with_value
+        from quoridor.bots.profiles import ProfileBot
+        from quoridor.gui import MatchSettings, QuoridorGUI, build_players
+
+        spec = with_value(with_value(default_spec("nnue", 0.3), WALLS, 2), LMR, False)
+        gui = QuoridorGUI()
+        human, bot = build_players(MatchSettings("hvb", bot=spec), gui, ("A", "B"))
+        self.assertIsInstance(bot.bot, ProfileBot)
+        self.assertEqual((bot.bot.options["wall_filter"], bot.bot.options["lmr"], bot.bot.options["eval_mode"]),
+                         (2, 0, 2))  # menu settings on top of the profile's own options
+        state = Board().snapshot(1)
+        move = bot.get_move(state)
         self.assertIsNone(Board().move_error(1, move))
         self.assertGreaterEqual(gui.bot_info["depth_reached"], 1)
 

@@ -138,23 +138,30 @@ if __name__ == "__main__":
 @unittest.skipIf(pygame is None, "pygame not installed")
 class TestModeSetup(unittest.TestCase):
     def test_build_players(self):
+        from quoridor.bots.profiles import ProfileBot
         from quoridor.gui import MatchSettings, QuoridorGUI, build_players
         from quoridor.gui.player import GuiBotPlayer, GuiHumanPlayer
         gui = QuoridorGUI()
         a, b = build_players(MatchSettings("hvh"), gui, ("A", "B"))
         self.assertIsInstance(a, GuiHumanPlayer)
         self.assertIsInstance(b, GuiHumanPlayer)
-        a, b = build_players(MatchSettings("hvb", depth=9, time_limit=2.0, human_side=1), gui, ("A", "B"))
+        # the default opponent is the strongest ranked bot
+        a, b = build_players(MatchSettings("hvb", human_side=1), gui, ("A", "B"))
         self.assertIsInstance(a, GuiBotPlayer)
-        self.assertEqual((a.bot.depth, a.bot.time_limit), (9, 2.0))
+        self.assertIsInstance(a.bot, ProfileBot)
+        self.assertEqual((a.bot.profile, a.bot.time_limit), ("hybrid", 5.0))
         self.assertIsInstance(b, GuiHumanPlayer)
+        # --depth / --time-limit on the command line: the plain alpha-beta bot
+        a, b = build_players(MatchSettings("hvb", depth=9, time_limit=2.0, human_side=1, bot=None), gui, ("A", "B"))
+        self.assertEqual((a.bot.depth, a.bot.time_limit), (9, 2.0))
 
     def test_menu_slider_range(self):
-        from quoridor.gui import QuoridorGUI
-        from quoridor.gui.menu import Menu
-        menu = Menu(QuoridorGUI())
-        self.assertEqual(menu.slider.value_at(menu.slider.rect.left - 50), 1)
-        self.assertEqual(menu.slider.value_at(menu.slider.rect.right + 50), 30)
+        from quoridor.gui.menu import Slider
+        slider = Slider(pygame.Rect(100, 0, 300, 8))
+        self.assertEqual(slider.value_at(50), 1)
+        self.assertEqual(slider.value_at(450), 30)
+        slider = Slider(pygame.Rect(100, 0, 300, 8), -1, 20)
+        self.assertEqual((slider.value_at(0), slider.value_at(999)), (-1, 20))
 
     def test_bot_vs_bot_players(self):
         from quoridor.bots import AlphaBetaBot, BotSpec
@@ -172,21 +179,53 @@ class TestModeSetup(unittest.TestCase):
         build_players(MatchSettings("hvh"), gui, ("A", "B"))
         self.assertFalse(gui.bots_only)
 
-    def test_wall_mode_buttons(self):
-        from quoridor.bots import BotSpec
-        from quoridor.bots.cpp_engine import WALL_MODES
+    def test_ranked_bot_selector(self):
+        from quoridor.bots.catalog import RANKED_BOTS
         from quoridor.gui import MatchSettings, QuoridorGUI
         from quoridor.gui.menu import Menu
         menu = Menu(QuoridorGUI())
         s = MatchSettings("hvb")
-        self.assertEqual(s.wall_filter, 1)  # attack + defense by default
-        for (_, value, _), rect in zip(WALL_MODES, menu.wall_rects):
-            s = menu._click(s, rect.center)
-            self.assertEqual(s.wall_filter, value)
-        s = MatchSettings("bvb", bots=(BotSpec(depth=2), BotSpec(depth=4)))
-        s = menu._click(s, menu.bot_wall_rects[0][0].center)  # Bot 1: attack only
-        s = menu._click(s, menu.bot_wall_rects[1][2].center)  # Bot 2: all walls
+        self.assertEqual(s.bot.model, "hybrid")
+        menu._layout(s)
+        s = menu._click(s, menu.selectors["hvb"][0].center)  # fold the list out
+        self.assertEqual(menu.open, "hvb")
+        menu._layout(s)
+        items = menu.selectors["hvb"][1]
+        self.assertEqual(len(items), 4)  # hybrid, nnue, tuned, turbo: strongest first
+        self.assertEqual([n for n, _, _ in RANKED_BOTS], ["hybrid", "nnue", "tuned", "turbo"])
+        s = menu._click(s, items[3].center)
+        self.assertIsNone(menu.open)
+        self.assertEqual(s.bot.model, "turbo")
+        menu._layout(s)
+        # the settings follow the bot: the hybrid's phase thresholds are gone for turbo
+        self.assertNotIn(("hvb", "hybrid_walls"), menu.controls)
+        self.assertIn(("hvb", "lmr"), menu.controls)
+
+    def test_bot_settings_controls(self):
+        from quoridor.gui import MatchSettings, QuoridorGUI
+        from quoridor.gui.menu import Menu
+        menu = Menu(QuoridorGUI())
+        s = MatchSettings("hvb")
+        menu._layout(s)
+        for key in ("depth", "time", "walls", "book", "lmr", "futility", "hash_mb", "hybrid_walls", "endgame_walls"):
+            self.assertIn(("hvb", key), menu.controls, key)
+        s = menu._click(s, menu.controls[("hvb", "walls")][0].center)  # attack only
+        s = menu._click(s, menu.controls[("hvb", "book")][1].center)   # book off
+        s = menu._click(s, menu.controls[("hvb", "time")][1].center)   # 1 s
+        bar = menu.controls[("hvb", "depth")][0]
+        s = menu._click(s, (bar.left + 1, bar.centery))                 # depth slider to the left end
+        self.assertEqual((s.bot.wall_filter, s.bot.book, s.bot.time_limit, s.bot.depth), (2, False, 1.0, 1))
+        self.assertIn("wall_filter=2", s.bot.to_string())
+        # Bot vs Bot: each column has its own selector and settings
+        s = MatchSettings("bvb")
+        menu._layout(s)
+        s = menu._click(s, menu.controls[("bvb0", "walls")][0].center)
+        s = menu._click(s, menu.controls[("bvb1", "walls")][2].center)
         self.assertEqual((s.bots[0].wall_filter, s.bots[1].wall_filter), (2, 0))
-        self.assertEqual((s.bots[0].depth, s.bots[1].depth), (2, 4))
-        menu.draw(s)  # both screens draw without errors
+        self.assertEqual((s.bots[0].model, s.bots[1].model), ("hybrid", "nnue"))
+        menu.draw(s)  # every screen draws without errors
+        menu.open = "bvb0"
+        menu.draw(s)
+        menu.open = None
         menu.draw(MatchSettings("hvb"))
+        menu.draw(MatchSettings("hvh"))

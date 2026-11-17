@@ -4,3 +4,6 @@ __pycache__/
 engine/build/
 *.parsed.png
 data/
+# live tournament output (force-added when finished)
+results/run.log
+results/rr_*/

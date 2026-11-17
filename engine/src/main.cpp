@@ -11,6 +11,7 @@
 //   play <move>                   -> ok        (applies a legal move to the position)
 //   dist                          -> dist <d0> <d1>
 //   eval                          -> eval <static evaluation for the side to move>
+//   block                         -> block <per player: locked, greedy block gains, rich flag>
 //   hash                          -> hash <zobrist key>
 //   set <option> <value>          -> ok        (see README.md for the options)
 //   newgame                       -> ok        (clears the transposition table)
@@ -96,6 +97,18 @@ bool set_option(Search& s, const std::string& name, const std::string& value, st
     else if (name == "tempo_bonus") c.tempo_bonus = int(v);
     else if (name == "wall_cap") c.wall_cap = v != 0;
     else if (name == "wall_cap_slack") c.wall_cap_slack = int(v);
+    else if (name == "smart_walls") c.smart_walls = v != 0;
+    else if (name == "wall_tie") c.wall_tie = int(v);
+    else if (name == "wall_low") c.wall_low = int(v);
+    else if (name == "wall_rich") c.wall_rich = int(std::clamp(v, 1L, 64L));
+    else if (name == "wall_chain") c.wall_chain = int(std::clamp(v, 1L, 4L));
+    else if (name == "wall_def") c.wall_def = int(v);
+    else if (name == "smart_dist") c.smart_dist = int(v);
+    else if (name == "lock_decided") c.lock_decided = v != 0;
+    else if (name == "def_global") c.def_global = v != 0;
+    else if (name == "def_funnel") c.def_funnel = v != 0;
+    else if (name == "def_threats") c.def_threats = int(std::clamp(v, 1L, 4L));
+    else if (name == "def_min_depth") c.def_min_depth = int(v);
     else if (name == "tt") c.use_tt = v != 0;
     else if (name == "tt_exact_depth") c.tt_exact_depth = v != 0;
     else if (name == "alphabeta") c.alphabeta = v != 0;
@@ -150,6 +163,34 @@ std::string selftest(int games, uint64_t seed) {
                     b.turn != before.turn || !(b.open[0] == before.open[0]) || !(b.open[1] == before.open[1]) ||
                     !(b.open[2] == before.open[2]) || !(b.open[3] == before.open[3]))
                     return "error unmake did not restore the position";
+            }
+            {
+                const Points bp = barrier_points(b.hw, b.vw);
+                const uint64_t fh = b.free_h(), fv = b.free_v();
+                for (int o = 0; o < 2; ++o)
+                    for (uint64_t x = o == 0 ? fh : fv; x; x &= x - 1) {
+                        const Move m = o == 0 ? hwall_move(std::countr_zero(x)) : vwall_move(std::countr_zero(x));
+                        if (!may_disconnect(bp, m) && (b.distance_with_wall(0, m) < 0 || b.distance_with_wall(1, m) < 0))
+                            return "error may_disconnect missed " + move_str(m);
+                    }
+            }
+            // A "locked" path: every free slot cutting one of its shortest paths must cut it off.
+            for (int p = 0; p < 2; ++p) {
+                const Blockability bl = analyse_blockability(b.layout(), p, 3, false);
+                const Blockability ex = analyse_blockability(b.layout(), p, 3, true);
+                if (ex.locked && !bl.locked) return "error exact lock without fast lock";
+                if (!bl.locked) continue;
+                GoalLayers gl;
+                b.goal_layers(p, gl, b.pawn[p]);
+                const PathCut cut = b.shortest_path_cuts(p, gl);
+                const uint64_t fh = b.free_h() & cut.h, fv = b.free_v() & cut.v;
+                for (int o = 0; o < 2; ++o)
+                    for (uint64_t x = o == 0 ? fh : fv; x; x &= x - 1) {
+                        const Move m = o == 0 ? hwall_move(std::countr_zero(x)) : vwall_move(std::countr_zero(x));
+                        if (b.distance_with_wall(p, m) >= 0)
+                            return "error locked path can be cut by " + move_str(m) + " (player " +
+                                   std::to_string(p) + ")";
+                    }
             }
             ++positions;
             if (fast.n == 0) break;
@@ -219,6 +260,16 @@ int main() {
         } else if (cmd == "eval") {
             const int me = search.board.turn;
             out = "eval " + std::to_string(search.evaluate(me, search.board.distance(me), search.board.distance(me ^ 1)));
+        } else if (cmd == "block") {
+            out = "block";
+            for (int p = 0; p < 2; ++p) {
+                const Search::PathInfo pi = search.path_info(p);
+                out += " p" + std::to_string(p) + (pi.locked ? " locked" : " open") + " gains";
+                for (int i = 0; i < pi.nsteps; ++i)
+                    out += " " + std::to_string(pi.gain[i]) + (pi.rich[i] ? "+rich" : "");
+                if (pi.nsteps == 0) out += " none";
+                if (pi.trunc) out += " ...";
+            }
         } else if (cmd == "hash") {
             out = "hash " + std::to_string(search.board.hash);
         } else if (cmd == "set") {

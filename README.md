@@ -327,6 +327,17 @@ The desktop start menu (`python main.py`) has its own **Auto-Play Mode** button 
 *Screen Assistant*. `--monitor`, `--scan-fps`, `--debug-preview` and `--vision-profile` work as
 for the assistant. Depth, think time, walls and engine can be changed in the panel.
 
+**Choosing the bot.** The **Bot** drop-down at the top of the panel picks which bot plays:
+*Standard* (C++, 1 s, the default), *Strong* (3 s), *Fast* (0.3 s), *Attack walls only*, *All
+walls*, *Classic eval* (the flat wall value from before the blockability evaluation), the Python
+alpha-beta bot, any trained ML checkpoint found under `runs/`, `checkpoints/`, `models/` or the
+current folder (when PyTorch is installed), or *Custom spec...*, which takes any
+[bot spec](#bot-settings) (e.g. `ab:depth=30,time=2,walls=attack` or `ml:model=best.pt`) and
+applies it on Enter. A spec given on the command line appears as the first entry. The switch takes
+effect at once; if the bot is in the middle of highlighting or clicking a move, the new bot takes
+over right after that move. The line under the drop-down shows the exact spec in use, and the
+folded *Bot settings* stay in sync with it. The presets are in `quoridor/bots/presets.py`.
+
 **It starts switched off.** Open the game so that the start position is visible, then press
 **Start auto-play** in the panel (`--armed` presses it at launch). The button turns into a red
 **STOP**.
@@ -551,7 +562,10 @@ python build_engine.py
 ```
 
 It implements the same rules, searches millions of positions per second, and adds a
-transposition table, wall filtering, decided-position cutoffs and futility pruning. With it, set a
+transposition table, wall filtering, decided-position cutoffs and futility pruning. Its evaluation
+values a wall reserve by what the walls can still do: walls against an opponent whose path runs
+through an unblockable corridor are worth (almost) nothing, and a race against such a path is
+recognised as decided (see *Evaluation* in [engine/README.md](engine/README.md)). With it, set a
 high depth and let the think time decide (e.g. `python main.py --mode bot --depth 30 --time-limit 2`).
 `python main.py --engine py` forces the Python search.
 
@@ -902,6 +916,7 @@ quoridor/
   bots/alphabeta.py    AlphaBetaBot: negamax alpha-beta search, heuristic, iterative deepening
   bots/cpp_engine.py   bridge to the C++ engine: CppEngine (process), CppBot (drop-in AlphaBetaBot)
   bots/factory.py      bot spec strings ("ab:depth=4", "ml:model=...") -> players / fast policies
+  bots/presets.py      named bot configurations for the Auto-Play bot selector
   botmatch.py          headless Bot vs Bot batch runner (parallel, statistics, JSON/CSV)
   ml/                  ML agent + training pipeline (PyTorch, see requirements-ml.txt)
     arena.py           fast game runner, seeded random openings, win-rate statistics

@@ -29,6 +29,16 @@ struct Config {
     // walls. Surplus walls are worthless in a race that is about to end.
     bool wall_cap = true;
     int wall_cap_slack = 1;
+    // Blockability-aware wall value (see README "Evaluation"): a wall is only worth
+    // what it can still do to the opponent's path.
+    bool smart_walls = true;
+    int wall_tie = 1;      // a wall that cannot lengthen the opponent's path at all (tie-breaker only)
+    int wall_low = 10;     // a wall that can only gain 1 step (a block of 2+ steps keeps wall_weight)
+    int wall_rich = 3;     // this many separate blocking bottlenecks: walls keep the full wall_weight
+    int wall_chain = 3;    // greedy blocks simulated when the path is only barely blockable
+    int wall_def = 6;      // a wall kept back to defend while the opponent can still block me
+    int smart_dist = 6;    // analyse only paths at most this long (longer ones count as richly blockable)
+    bool lock_decided = true;  // race cutoffs also when the opponent's walls provably cannot touch my path
 
     // ---- search features ----
     bool use_tt = true;           // transposition table
@@ -37,6 +47,11 @@ struct Config {
     bool killers = true;          // killer-move ordering
     bool history = true;          // history-heuristic ordering
     int wall_filter = FILTER_ATTACK_DEFENSE;  // Step 3
+    // Defensive walls beyond "overlaps the attacking wall" (filter 1 only):
+    bool def_global = true;   // walls that make an attacking wall illegal (path-existence rule)
+    bool def_funnel = true;   // walls extending such a barrier (one follow-up wall from sealing it)
+    int def_threats = 2;      // strongest opponent walls against me that are analysed
+    int def_min_depth = 2;    // remaining depth needed for global defense (funnel: one more)
     bool decided = true;          // Step 5: exact race cutoffs
     int decided_margin = 1;       // extra steps required when the pawns can still meet
     bool futility = true;         // Step 6
@@ -68,6 +83,19 @@ public:
     SearchResult go(int max_depth, double time_limit);
 
     int evaluate(int me, int d_me, int d_opp) const;
+
+    // Cached blockability of `target`'s path: the greedy chain of single-wall
+    // blocks the other player could make (see board.h, Blockability).
+    struct PathInfo {
+        uint8_t trunc_dep;  // cache-internal: key-1 entry whose answer is under key 2
+        uint8_t locked, nsteps, trunc;
+        uint8_t gain[4];  // steps added by block i (0..nsteps-1)
+        uint8_t rich[4];  // block i had >= wall_rich opportunities: stop, walls keep full value
+    };
+    PathInfo path_info(int target, int d_target = -1) const;
+    // Value of `attacker`'s wall reserve against `target` (eval units). `w_eff`:
+    // walls that count at all, `useful`: of those, the ones that can lengthen the path.
+    int wall_attack_value(int attacker, int d_target, int& w_eff, int& useful) const;
     // Moves in the order the search would try them at the root (debugging / tests).
     void ordered_moves(MoveList& out);
 
@@ -87,6 +115,14 @@ private:
         uint8_t d_me, d_opp;  // shortest-path lengths after the move
     };
 
+    struct EvalEntry {
+        uint64_t key;
+        PathInfo info;
+        uint8_t pad[4];
+    };
+    mutable std::vector<EvalEntry> ecache_;  // allocated once; no allocation during the search
+    uint64_t ecache_mask_ = 0;
+
     std::vector<TTEntry> tt_;
     uint64_t tt_mask_ = 0;
     uint8_t age_ = 0;
@@ -104,7 +140,9 @@ private:
     int negamax(int depth, int alpha, int beta, int ply, int d_me, int d_opp);
     int decided_score(int me, int d_me, int d_opp, int ply) const;
     bool can_interact(int winner, int d_winner) const;
-    int gen_walls(int me, int d_me, int d_opp, const GoalLayers& gl_me, int filter, Cand* out) const;
+    int gen_walls(int me, int d_me, int d_opp, const GoalLayers& gl_me, int filter, int depth, Cand* out) const;
+    void global_defense(int me, int d_me, const PathCut& cut_me, const PathCut& cut_opp, uint64_t free_h,
+                        uint64_t free_v, bool funnel, uint64_t (&def)[2], uint64_t (&fun)[2]) const;
     TTEntry* tt_probe(uint64_t key);
     void tt_store(uint64_t key, int depth, int value, int flag, Move move);
 };

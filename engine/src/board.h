@@ -95,6 +95,81 @@ struct PathCut {
     uint64_t h = 0, v = 0;
 };
 
+// --------------------------------------------------------------------------
+// Free functions on an arbitrary set of open masks, so the evaluation can try
+// hypothetical walls on a stack copy without touching the board.
+// --------------------------------------------------------------------------
+inline BB expand_open(const BB* open, BB front) {
+    return (front & open[NORTH]).shr(N) | (front & open[SOUTH]).shl(N) |
+           (front & open[WEST]).shr(1) | (front & open[EAST]).shl(1);
+}
+inline int popcount(BB b) { return std::popcount(b.lo) + std::popcount(b.hi); }
+inline int lowest_square(BB b) { return b.lo ? std::countr_zero(b.lo) : 64 + std::countr_zero(b.hi); }
+
+// Steps from `from` to the goal set, -1 if it cannot be reached.
+int flood_distance(const BB* open, int from, BB goal);
+// Remove the two edges a wall blocks.
+void clear_wall(BB* open, Move wall);
+void goal_layers_open(const BB* open, int player, GoalLayers& out, int stop_sq = -1);
+PathCut path_cuts_open(const BB* open, int pawn, const GoalLayers& gl);
+uint64_t free_h_of(uint64_t hw, uint64_t vw);
+uint64_t free_v_of(uint64_t hw, uint64_t vw);
+// Wall slots that touch `m` end to end or form a T / L with it: the slots that
+// extend the same barrier. Used to find "funnelling" defensive walls.
+void touching_slots(Move m, uint64_t& h, uint64_t& v);
+
+// Lattice points (the 10 x 10 wall corners) as a 100-bit set: bit i*10+j.
+struct Points {
+    uint64_t lo = 0, hi = 0;
+};
+// Points touched by the placed walls, plus the board border.
+Points barrier_points(uint64_t hw, uint64_t vw);
+// A new wall can only cut a player off if it closes a barrier curve, which needs
+// at least two of its three points (ends and centre) to touch the walls placed
+// or the border. false = the wall is guaranteed to keep everybody connected.
+bool may_disconnect(const Points& barrier, Move wall);
+
+// --------------------------------------------------------------------------
+// Blockability of one player's shortest path (Task: unblockable corridors).
+//
+// The shortest-path DAG of the target is walked layer by layer from its pawn.
+// A single wall can only lengthen the path if it cuts EVERY shortest path, and
+// the usual way it does that is by covering all edges between two consecutive
+// layers (a "bottleneck": 1 edge, or 2 parallel edges side by side). For every
+// bottleneck the covering wall slots are tested with a BFS: the wall must keep
+// both players connected (path-existence rule). Each bottleneck with a legal
+// covering wall is one blocking "opportunity" and its gain is exact.
+//
+// Layers that no single wall closes but where a legal wall cuts some of the
+// routes are "soft": two or more walls together can still lengthen the path.
+//
+// `locked` is a proof that the target's distance can never increase again by
+// walls: every free slot cutting any edge of any shortest path would cut the
+// TARGET off. Walls are only ever added, so such a slot stays illegal, an
+// occupied slot stays occupied, and walking along a shortest path only keeps a
+// subset of these edges.
+// --------------------------------------------------------------------------
+struct Blockability {
+    int opportunities = 0;  // bottleneck layers with a legal covering wall (capped at `limit`)
+    int soft = 0;           // other layers where a legal wall cuts some (not all) routes
+    int best_gain = 0;      // largest gain among them (exact BFS distance difference)
+    Move best_wall = MOVE_NONE;
+    bool locked = false;
+};
+struct Layout {  // walls + edges of a (possibly hypothetical) position
+    BB open[4];
+    uint64_t hw, vw;
+    uint8_t pawn[2];
+};
+// `limit`: stop scanning once that many opportunities are found (the path is
+// then "richly" blockable and the exact count does not matter).
+// `exact` = false is the fast pass: only the target's own connectivity is
+// checked and each bottleneck stops at its first usable slot. It never reports
+// a false `locked` (that proof only needs the target's connectivity), and its
+// result does not depend on where the other pawn stands.
+Blockability analyse_blockability(const Layout& lay, int target, int limit, bool exact = true);
+void apply_wall(Layout& lay, Move wall);
+
 struct Board {
     BB open[4];           // open[d]: squares from which a pawn may step in direction d
     uint64_t hw = 0, vw = 0;  // placed walls, bit = anchor row * 8 + col
@@ -145,6 +220,9 @@ struct Board {
     // Slow reference implementation (one BFS per wall and player); tests only.
     void legal_moves_slow(MoveList& out) const;
     bool is_legal(Move m) const;
+    Layout layout() const {
+        return Layout{{open[0], open[1], open[2], open[3]}, hw, vw, {pawn[0], pawn[1]}};
+    }
 };
 
 // Zobrist keys (fixed seed, so hashes are reproducible between runs).

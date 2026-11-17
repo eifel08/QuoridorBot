@@ -12,15 +12,21 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Optional
 
+from ..bots.cpp_engine import WALL_MODES, engine_available
+from ..bots.factory import BotSpec, parse_bot_spec
+from ..bots.presets import CUSTOM_LABEL, label_for, preset_choices
 from ..moves import Orientation, WallMove
 from .analysis import DEFAULT_SPEC
-from .app import BG, BLUE_HEX, CARD, DIM, GOOD, MARK, RED_HEX, TEXT, WARN, AssistantApp, enable_dpi_awareness
+from .app import (BG, BLUE_HEX, CARD, DIM, GOOD, MARK, RED_HEX, TEXT, WALL_LABELS, WARN, AssistantApp,
+                  enable_dpi_awareness)
 from .autoplay import WALL_CLICKS, AutoPlayer, ClickProfile, EmergencyStop, PyAutoGuiMouse, StopSwitch, wall_points
 from .parser import Profile
 
 STATE_TEXT = {"off": "OFF", "waiting-start": "WAITING FOR A GAME", "opponent": "WAITING FOR OPPONENT",
               "thinking": "THINKING", "highlighting": "ABOUT TO PLAY", "moving": "CLICKING",
               "confirming": "CLICKED", "over": "GAME OVER"}
+#: While the bot is about to click or clicking, a new bot only takes over after that move.
+BUSY_STATES = ("highlighting", "moving", "confirming")
 
 
 class AutoPlayApp(AssistantApp):
@@ -37,6 +43,7 @@ class AutoPlayApp(AssistantApp):
         self.player = AutoPlayer(mouse or PyAutoGuiMouse(), self.click_profile, self.stop, join_in_progress)
         self.player.before_click = self._before_click
         self._hover_test = 0
+        self._pending_spec: Optional[BotSpec] = None
         super().__init__(spec, monitor, fps, profile, debug, overlay=False, grabber=grabber)
         self.root.title("Quoridor Auto-Play")
         self.bar.config(height=120)              # the panel is taller than the assistant's: save some room
@@ -60,6 +67,28 @@ class AutoPlayApp(AssistantApp):
         self.auto_identity.pack(fill="x", padx=10, pady=(6, 0))
         self.auto_signals = self._label(box, "", DIM, 9, wraplength=280)
         self.auto_signals.pack(fill="x", padx=10)
+
+        # Which bot plays: presets, trained ML checkpoints found on disk, or any bot spec.
+        self.bot_choices = preset_choices(self.spec)
+        bot_row = tk.Frame(box, bg=CARD)
+        bot_row.pack(fill="x", padx=10, pady=(8, 0))
+        self._label(bot_row, "Bot", DIM, 9).pack(side="left")
+        self.bot_var = tk.StringVar(value=label_for(self.spec, self.bot_choices))
+        self.bot_box = ttk.Combobox(bot_row, width=36, textvariable=self.bot_var, state="readonly",
+                                    values=[label for label, _ in self.bot_choices] + [CUSTOM_LABEL])
+        self.bot_box.pack(side="right", fill="x", expand=True, padx=(8, 0))
+        self.bot_box.bind("<<ComboboxSelected>>", self._on_bot_selected)
+        self.custom_row = tk.Frame(box, bg=CARD)
+        self.custom_var = tk.StringVar(value=self.spec.to_string())
+        entry = tk.Entry(self.custom_row, textvariable=self.custom_var, bg=BG, fg=TEXT, insertbackground=TEXT,
+                         relief="flat", font=("Consolas", 9))
+        entry.pack(side="left", fill="x", expand=True)
+        entry.bind("<Return>", lambda _e: self._apply_custom())
+        tk.Button(self.custom_row, text="Use", command=self._apply_custom, bg=BG, fg=TEXT, activebackground=CARD,
+                  activeforeground=TEXT, relief="flat").pack(side="right", padx=(6, 0))
+        self._bot_row = bot_row
+        self.bot_info = self._label(box, "", DIM, 9, wraplength=280)
+        self.bot_info.pack(fill="x", padx=10)
         self.auto_button = tk.Button(box, text="Start auto-play", command=self._toggle_auto, bg="#2e7d46", fg="white",
                                      activebackground="#3c9a59", activeforeground="white", relief="flat",
                                      font=("Segoe UI", 11, "bold"))
@@ -80,6 +109,63 @@ class AutoPlayApp(AssistantApp):
         self.join_var = tk.BooleanVar(value=self.player.join_in_progress)
         tk.Checkbutton(box, text="Join a game in progress", variable=self.join_var, bg=CARD, fg=TEXT, selectcolor=BG,
                        activebackground=CARD, activeforeground=TEXT, anchor="w").pack(fill="x", padx=6, pady=(2, 6))
+
+    # -- bot selection -----------------------------------------------------------------
+    def _on_bot_selected(self, _event=None) -> None:
+        label = self.bot_var.get()
+        if label == CUSTOM_LABEL:
+            self.custom_var.set(self.spec.to_string())
+            self.custom_row.pack(fill="x", padx=10, pady=(4, 0), after=self._bot_row)
+            self.bot_info.config(text="Type a bot spec, e.g. ab:depth=30,time=2,walls=attack or ml:model=best.pt, "
+                                      "then press Enter.", fg=DIM)
+            return
+        self.custom_row.pack_forget()
+        spec = next((s for lbl, s in self.bot_choices if lbl == label), None)
+        if spec is not None:
+            self.select_bot(spec)
+
+    def _apply_custom(self) -> None:
+        try:
+            spec = parse_bot_spec(self.custom_var.get())
+        except ValueError as exc:
+            self.bot_info.config(text=str(exc), fg=RED_HEX)
+            return
+        self.select_bot(spec)
+
+    def select_bot(self, spec: BotSpec) -> bool:
+        """Make ``spec`` the bot that plays. Returns False (with the reason shown) if it cannot be used."""
+        if spec.kind == "ab" and spec.engine == "cpp" and not engine_available():
+            self.bot_info.config(text="The C++ engine is not built (python build_engine.py).", fg=RED_HEX)
+            return False
+        if spec.kind == "ml":
+            try:
+                import torch  # noqa: F401
+            except Exception:
+                self.bot_info.config(text="ML bots need PyTorch (pip install -r requirements-ml.txt).", fg=RED_HEX)
+                return False
+        if self.player.state in BUSY_STATES:
+            self._pending_spec = spec  # never swap the engine under a move that is being clicked
+            self.bot_info.config(text=f"Switching to {spec.label()} after this move...", fg=WARN)
+            return True
+        self._set_spec(spec)
+        return True
+
+    def _set_spec(self, spec: BotSpec) -> None:
+        self._pending_spec = None
+        self.spec = spec
+        if spec.kind == "ab":
+            # Keep the folded "Bot settings" in line: they are re-read on every tick.
+            self.depth_var.set(str(spec.depth))
+            self.time_var.set(f"{spec.time_limit:g}" if spec.time_limit else "no limit")
+            wall_name = next((n for n, v, _ in WALL_MODES if v == spec.wall_filter), "both")
+            self.walls_var.set(WALL_LABELS[wall_name])
+            self.engine_var.set({"auto": "Auto", "cpp": "C++", "py": "Python"}[spec.engine])
+        current = self.tracker.current
+        with self._lock:
+            self._analysis = None
+            self._searching = current if (current and current.turn is not None and current.winner is None) else None
+        self.analyzer.set_spec(spec, current)
+        self.player.log(f"Bot: {spec.label()} ({spec.to_string()})")
 
     def _toggle_auto(self) -> None:
         if self.player.armed:
@@ -131,6 +217,13 @@ class AutoPlayApp(AssistantApp):
         player = self.player
         self.click_profile.wall_click = self.wall_var.get() if not player.state == "moving" else self.click_profile.wall_click
         player.join_in_progress = self.join_var.get()
+        if self._pending_spec is not None and player.state not in BUSY_STATES:
+            self._set_spec(self._pending_spec)
+        if self._pending_spec is None:
+            label = label_for(self.spec, self.bot_choices)
+            if self.bot_var.get() != CUSTOM_LABEL and self.bot_var.get() != label:
+                self.bot_var.set(label)  # changed from the folded settings
+            self.bot_info.config(text=f"Playing with: {self.spec.to_string()}", fg=DIM)
         with self._lock:
             analysis = self._analysis
         was_testing = "Cursor is where" in self.auto_message.cget("text") and not player.armed

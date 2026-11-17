@@ -46,7 +46,8 @@ class EngineCase(unittest.TestCase):
 
     def setUp(self):
         for name, value in {"futility": 1, "wall_filter": 1, "decided": 1, "tt": 1, "tt_exact_depth": 0,
-                            "alphabeta": 1, "seed": 0}.items():
+                            "alphabeta": 1, "seed": 0, "wall_cap": 1, "smart_walls": 1, "lock_decided": 1,
+                            "def_global": 1}.items():
             self.engine.set_option(name, value)
 
 
@@ -210,6 +211,7 @@ class TestSearch(EngineCase):
         # Red: 4 steps, 6 walls; Blue: 2 steps, no walls; Red to move. Red only has about
         # 2 + 1 turns left to place walls, so only 3 of its 6 walls count.
         pos = "position 0 4 0 6 4 6 0"
+        self.engine.set_option("smart_walls", 0)  # the plain reserve count (blockability: see below)
         self.engine.set_position(pos)
         self.assertEqual(self.engine.evaluate(), (2 - 4) * 10 + 3 * 16 + 5)
         self.engine.set_option("wall_cap", 0)
@@ -219,6 +221,49 @@ class TestSearch(EngineCase):
         # Far from the goal the cap changes nothing (8 steps each: up to 9 walls count).
         self.engine.set_position("position 0 8 4 0 4 8 7")
         self.assertEqual(self.engine.evaluate(), 0 * 10 + 1 * 16 + 5)
+
+    # Red 4 steps from its goal with all 10 walls; Blue 3 steps away inside a sealed
+    # one-square-wide tunnel down column 0: any wall across it would cut Blue off.
+    CORRIDOR = "position 0 4 4 5 0 10 0 h71 h73 h75 h77 v50 v70"
+
+    def test_unblockable_corridor_makes_walls_worthless(self):
+        self.engine.set_position(self.CORRIDOR)
+        self.assertEqual(self.engine.command("block"), "block p0 open gains 1+rich p1 locked gains none")
+        # Only a tie-breaker per wall that could still be placed (Blue's 3 steps + 1).
+        self.assertEqual(self.engine.evaluate(), (3 - 4) * 10 + 4 * 1 + 5)
+        self.engine.set_option("smart_walls", 0)
+        self.engine.set_position(self.CORRIDOR)
+        self.assertGreater(self.engine.evaluate(), 50)  # the flat reserve count: "Red is winning"
+
+    def test_locked_corridor_is_a_decided_race(self):
+        self.engine.set_position(self.CORRIDOR)
+        _, info = self.engine.go(depth=1)
+        self.assertEqual(info["forced"], "loss")  # proven at once, Red's walls cannot change it
+        self.engine.set_option("lock_decided", 0)
+        self.engine.set_position(self.CORRIDOR)
+        _, info = self.engine.go(depth=1)
+        self.assertIsNone(info["forced"])
+
+    def test_blockable_path_keeps_full_wall_value(self):
+        # Same tunnel with its lower side open: a wall at the entrance forces a long detour,
+        # so Red's walls keep exactly the flat value (blockability never over-discounts).
+        pos = "position 0 4 4 5 0 10 0 h71 h73 h75 h77 v50"
+        self.engine.set_position(pos)
+        self.assertIn("p1 open gains 6", self.engine.command("block"))
+        ev = self.engine.evaluate()
+        self.engine.set_option("smart_walls", 0)
+        self.engine.set_position(pos)
+        self.assertEqual(ev, self.engine.evaluate())
+
+    def test_global_defense_walls_are_searched(self):
+        # Every wall the filter generates is legal, with or without the global defense.
+        for opts in ({"def_global": 1}, {"def_global": 0}):
+            for name, value in opts.items():
+                self.engine.set_option(name, value)
+            for pos in BENCH_POSITIONS.values():
+                self.engine.set_position(pos)
+                legal = set(self.engine.legal_moves())
+                self.assertLessEqual(set(self.engine.search_order()), legal)
 
     def test_decided_race(self):
         board = Board()

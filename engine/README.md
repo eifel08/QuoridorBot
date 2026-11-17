@@ -117,8 +117,12 @@ The cost is one pipe round trip per move (well under a millisecond), irrelevant 
 Pawn moves are always generated. Walls are limited to:
 
 * **attack walls**: block an edge on any shortest path of the opponent;
-* **defense walls**: overlap or cross a wall the opponent could place to block an edge on any of
-  *my* shortest paths (they pre-empt that wall).
+* **defense walls**, three kinds (see [Defensive walls](#defensive-walls-def_global-def_funnel)):
+  * *local*: overlap or cross a wall the opponent could place to block an edge on any of *my*
+    shortest paths (they pre-empt that wall by taking its slot);
+  * *global*: anywhere on the board, make one of the opponent's strongest attacking walls
+    **illegal** under the path-existence rule;
+  * *funnelling*: extend a barrier that one more wall would close in that way.
 
 Instead of two full BFS runs per player the engine floods once from the goal row and then walks
 from the pawn through decreasing distance layers; this visits exactly the edges `u->v` with
@@ -129,21 +133,66 @@ If the filter leaves a player without any move, all legal walls are generated.
 ### Evaluation
 
 ```
-eval = (opp_dist - my_dist) * dist_weight + (my_walls' - opp_walls') * wall_weight + tempo_bonus
-
-my_walls'  = min(my_walls,  opp_dist + wall_cap_slack)     (with wall_cap on, the default)
-opp_walls' = min(opp_walls, my_dist  + wall_cap_slack)
+eval = (opp_dist - my_dist) * dist_weight + W(me -> opp) - W(opp -> me) + tempo_bonus
 ```
 
-from the side to move's point of view. **Dynamic wall value**: a player can place at most one wall
-per turn, and only on the turns it still gets before the opponent arrives, so a reserve only counts
-up to the opponent's remaining distance (+1 turn of slack). Example: Red 4 steps from its goal with
-6 walls, Blue 2 steps away with none: the old formula counted all 6 walls (+8.1 steps for Red), the
-capped one counts 3 (+3.3). Far from the goal the cap changes nothing.
+from the side to move's point of view. `W(A -> B)` is the value of A's wall reserve **against B's
+path**, i.e. of what A's walls can still do to B:
 
-### Decided positions (`decided`)
+1. **Usable walls** `w_eff = min(walls_A, dist_B + wall_cap_slack)`: A places at most one wall per
+   turn it still gets before B arrives (`wall_cap`).
+2. **Blockability of B's path** (`smart_walls`, only when `dist_B <= smart_dist`; longer paths
+   count as richly blockable). B's shortest-path DAG is walked layer by layer from B's pawn. A
+   single wall can only lengthen B's path by cutting *every* shortest path, i.e. by covering all
+   edges between two consecutive layers: a **bottleneck** (one edge, or two side by side). Each
+   bottleneck slot is tested: it must keep *both* players connected (path-existence rule), and the
+   BFS gives its exact gain. Layers that no single wall closes but where a legal wall cuts some of
+   the routes are **soft** (two or more walls can still do something there). Result:
+   * **unblockable**: no free slot cutting any edge of any shortest path of B is legal. If those
+     slots are all illegal because they would cut *B itself* off, the path is **locked**: walls
+     are only ever added, so no wall can ever lengthen it (proof below);
+   * **richly blockable**: `>= wall_rich` (3) bottleneck/soft layers, or 2 soft layers;
+   * **barely blockable**: 1-2 of them. Then the greedy chain is simulated: place the best
+     blocking wall on a copy of the board, re-analyse the opponent's new (2nd, 3rd ...) shortest
+     path, up to `wall_chain` (3) blocks. Each block's gain is exact.
+3. **Wall values** (eval units, 10 = one step):
 
-A player without walls cannot lengthen the other one's path, so the game is a race. If the opponent
+   | Wall | Value |
+   |---|---|
+   | path richly blockable (also: still blockable after `wall_chain` simulated blocks) | `wall_weight` = 16 each |
+   | chain block of 2+ steps | 16 |
+   | chain block of exactly +1 step (or a soft layer, which takes two walls) | `wall_low` = 10 |
+   | wall beyond the chain (path unblockable after it), or path unblockable / locked | `wall_tie` = 1 |
+   | such a "useless" wall while the opponent can still block *me* | `wall_def` = 6, at most one per opponent wall that can hurt me (kept back for defense) |
+
+So with an unblockable shortest path the opponent's reserve drops from 16 per wall to 1 per wall
+(a pure tie-breaker), and a path that one wall can lengthen by one step before it becomes
+unblockable gives the whole reserve 10 + 1 + 1 ... instead of 16 per wall.
+
+Example (`tests/test_cpp_engine.py`, `CORRIDOR`): Red 4 steps from its goal with 10 walls, Blue 3
+steps away inside a sealed one-square-wide tunnel. The flat reserve count says Red is clearly
+winning (+59); the blockability eval gives -1, and the search proves the loss at depth 1 instead
+of after 28 000 nodes.
+
+**Cost.** One goal flood, one walk over the DAG and an early-exit BFS per bottleneck slot, with no
+heap allocation (all scratch data on the stack). Most BFS are skipped by a planar argument: a new
+wall can only disconnect a player if it closes a barrier curve, which needs at least two of its
+three lattice points to touch a placed wall or the border (`may_disconnect`, checked against a
+brute-force BFS in `selftest`). A distance equal to the row distance means the only shortest path
+is the pawn's own column, decided from bitmasks without any flood. Results are cached (768 KB
+table) in two levels: walls + target pawn for the answers that do not depend on the other pawn
+(rich / unblockable), plus the other pawn for the exact chain.
+
+**Lock proof.** Every free slot that cuts an edge of any shortest path of B would disconnect B.
+Walls are only added, so such a slot stays illegal and an occupied slot stays occupied; walking
+along a shortest path only keeps a subset of its edges. Hence B's distance can never be increased
+by walls again. `selftest` checks the claim on every position of its random games.
+
+### Decided positions (`decided`, `lock_decided`)
+
+A player without walls cannot lengthen the other one's path, so the game is a race. The same holds
+when the other one's path is **locked** (see above): its walls exist but can never touch it
+(`lock_decided`, for paths of at most `smart_dist` steps). If the opponent
 has no walls and `my_dist <= opp_dist` (my move), the node returns a win; if I have no walls and
 `opp_dist < my_dist`, a loss. The score is `WIN - (ply + plies the race still takes)`.
 
@@ -151,6 +200,26 @@ The pawns meeting can change a race by a step (a jump gains one). The engine the
 whether the loser can get next to any square of the winner's shortest paths by the time the winner
 is there. If not, the result is exact. If the pawns can meet, the result is only declared with an
 extra `decided_margin` (default 1) steps of lead; otherwise the normal search continues.
+
+### Defensive walls (`def_global`, `def_funnel`)
+
+With `wall_filter=1` a wall is **defensive** if it pre-empts one of the opponent's attacking walls
+`W_atk` (a legal wall that lengthens my shortest path), in one of three ways:
+
+1. **Local**: it overlaps or crosses `W_atk`, which then cannot be placed.
+2. **Global (path existence)**: with both it and `W_atk` on the board, *some* player (me or the
+   opponent) would have no path to its goal, so `W_atk` becomes illegal. The wall can be anywhere
+   on the board. For the `def_threats` (2) strongest `W_atk` (largest loss for me), the engine
+   places `W_atk` on a copy of the board and tests every free slot cutting a shortest path of
+   either player there with an early-exit BFS (only such a slot can disconnect that player).
+   A wall that is both an attack and a global defense is ordered first within the attack walls.
+3. **Funnelling**: free slots that touch `W_atk` or a global-defense slot end to end (or as a T)
+   **and** touch a placed wall or the border. They extend a barrier that one follow-up wall would
+   close, so the opponent's attack would become illegal one move later (or a wall the opponent
+   places to stop that helps seal the other side). Ordered after the other defense walls.
+
+Global defense is computed at nodes with at least `def_min_depth` (2) plies left, funnelling with
+one more, so the nodes next to the leaves stay cheap.
 
 ### Futility pruning (`futility`)
 
@@ -174,7 +243,19 @@ Set with `set <name> <value>` in the protocol, `CppBot(options={...})`, bot spec
 | `tempo_bonus` | 5 | evaluation: bonus for the side to move |
 | `wall_cap` | 1 | evaluation: count a wall reserve only up to the opponent's distance + slack |
 | `wall_cap_slack` | 1 | extra turns allowed by the cap |
+| `smart_walls` | 1 | evaluation: blockability-aware wall value (0 = flat reserve count) |
+| `smart_dist` | 6 | analyse paths of at most this many steps (longer ones count as richly blockable) |
+| `wall_rich` | 3 | blocking layers from which walls keep the full `wall_weight` |
+| `wall_chain` | 3 | greedy blocks simulated for a barely blockable path (1-4) |
+| `wall_low` | 10 | value of a wall that can only add one step |
+| `wall_tie` | 1 | value of a wall that cannot lengthen the opponent's path |
+| `wall_def` | 6 | value of such a wall while the opponent can still block me |
+| `lock_decided` | 1 | race cutoffs also when the opponent's walls provably cannot touch my path |
 | `wall_filter` | 1 | 0 = all legal walls, 1 = attack + defense walls, 2 = attack walls only |
+| `def_global` | 1 | defense walls also include walls making an attacking wall illegal |
+| `def_funnel` | 1 | ... and walls one step short of that (funnelling) |
+| `def_threats` | 2 | opponent attacking walls analysed for global defense (1-4) |
+| `def_min_depth` | 2 | remaining depth needed for global defense (funnelling: one more) |
 | `decided` | 1 | decided-position cutoffs |
 | `decided_margin` | 1 | extra lead required when the pawns can still meet |
 | `futility` | 1 | futility pruning |
@@ -199,8 +280,11 @@ position <turn> <r0> <c0> <r1> <c1> <walls0> <walls1> [h<r><c> | v<r><c>]...
 go [depth N] [time SECONDS]   -> bestmove m74 depth 9 score 21 nodes 1234567 time 0.4991
 moves                         -> every legal move (never filtered)
 genmoves                      -> the moves the search tries, in order (filter applied)
-play <move> | dist | eval | hash | set <name> <value> | newgame | selftest [games] [seed] | quit
+play <move> | dist | eval | block | hash | set <name> <value> | newgame | selftest [games] [seed] | quit
 ```
+
+`block` prints the blockability of both players' paths, e.g.
+`block p0 open gains 1+rich p1 locked gains none` (the gains of the simulated greedy blocks).
 
 Moves are `m<row><col>` (pawn to that square), `h<row><col>` / `v<row><col>` (wall anchor), the same
 coordinates as `PawnMove` / `WallMove`.

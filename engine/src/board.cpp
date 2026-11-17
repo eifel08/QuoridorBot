@@ -12,6 +12,9 @@ BB WALL_CLEAR_A[2][NWALL];  // [0] horizontal: SOUTH, [1] vertical: EAST
 BB WALL_CLEAR_B[2][NWALL];  // [0] horizontal: NORTH, [1] vertical: WEST
 BB OPEN_EMPTY[4];           // open masks of a board without walls
 BB GOAL[2];
+uint64_t TOUCH[2][NWALL][2];
+Points WALL_PTS[2][NWALL];   // the 3 lattice points of each slot
+Points BORDER_PTS;  // [orientation][anchor][orientation of the touching slot]
 bool tables_ready = false;
 
 constexpr uint64_t COL0 = 0x0101010101010101ULL;  // anchor column 0
@@ -46,6 +49,39 @@ void Board::init_tables() {
         WALL_CLEAR_A[1][a] = BB::square(s) | BB::square(s + N);          // lose EAST
         WALL_CLEAR_B[1][a] = BB::square(s + 1) | BB::square(s + N + 1);  // lose WEST
     }
+    // Lattice points (row, col) of the 10 x 10 corner grid a wall slot runs through.
+    auto points = [](int o, int a, int out[3][2]) {
+        const int r = a / NW, c = a % NW;
+        for (int k = 0; k < 3; ++k) {
+            out[k][0] = o == 0 ? r + 1 : r + k;
+            out[k][1] = o == 0 ? c + k : c + 1;
+        }
+    };
+    for (int o = 0; o < 2; ++o)
+        for (int a = 0; a < NWALL; ++a) {
+            int p[3][2];
+            points(o, a, p);
+            for (int o2 = 0; o2 < 2; ++o2)
+                for (int b = 0; b < NWALL; ++b) {
+                    if (o2 == o && b == a) continue;
+                    int q[3][2];
+                    points(o2, b, q);
+                    bool touch = false;
+                    for (auto& x : p)
+                        for (auto& y : q) touch |= x[0] == y[0] && x[1] == y[1];
+                    if (touch) TOUCH[o][a][o2] |= 1ULL << b;
+                }
+            for (auto& x : p) {
+                const int i = x[0] * 10 + x[1];
+                (i < 64 ? WALL_PTS[o][a].lo : WALL_PTS[o][a].hi) |= 1ULL << (i & 63);
+            }
+        }
+    for (int i = 0; i < 10; ++i)
+        for (int j = 0; j < 10; ++j)
+            if (i == 0 || j == 0 || i == 9 || j == 9) {
+                const int k = i * 10 + j;
+                (k < 64 ? BORDER_PTS.lo : BORDER_PTS.hi) |= 1ULL << (k & 63);
+            }
     uint64_t seed = 0x51ED270B0A7D1E55ULL;
     for (auto& p : ZOB.pawn)
         for (auto& k : p) k = splitmix64(seed);
@@ -153,9 +189,7 @@ void Board::unmake(Move m, int prev_sq) {
 // Path finding: breadth-first flood fill on bitboards. Each BFS level is a
 // handful of 128-bit shifts/ANDs, with no queue and no per-square work.
 // --------------------------------------------------------------------------
-namespace {
-
-inline int flood_distance(const BB* open, int from, BB goal) {
+int flood_distance(const BB* open, int from, BB goal) {
     BB front = BB::square(from);
     if ((front & goal).any()) return 0;
     BB seen = front;
@@ -169,31 +203,71 @@ inline int flood_distance(const BB* open, int from, BB goal) {
     }
 }
 
-}  // namespace
+void clear_wall(BB* o, Move wall) {
+    if (is_hwall(wall)) {
+        const int a = wall - H_BASE;
+        o[SOUTH] &= ~WALL_CLEAR_A[0][a];
+        o[NORTH] &= ~WALL_CLEAR_B[0][a];
+    } else {
+        const int a = wall - V_BASE;
+        o[EAST] &= ~WALL_CLEAR_A[1][a];
+        o[WEST] &= ~WALL_CLEAR_B[1][a];
+    }
+}
+
+void apply_wall(Layout& lay, Move wall) {
+    clear_wall(lay.open, wall);
+    if (is_hwall(wall)) lay.hw |= 1ULL << (wall - H_BASE);
+    else lay.vw |= 1ULL << (wall - V_BASE);
+}
+
+uint64_t free_h_of(uint64_t hw, uint64_t vw) { return ~(hw | ((hw & ~COL7) << 1) | ((hw & ~COL0) >> 1) | vw); }
+uint64_t free_v_of(uint64_t hw, uint64_t vw) { return ~(vw | (vw << NW) | (vw >> NW) | hw); }
+
+Points barrier_points(uint64_t hw, uint64_t vw) {
+    Points p = BORDER_PTS;
+    for (uint64_t b = hw; b; b &= b - 1) {
+        const Points& w = WALL_PTS[0][std::countr_zero(b)];
+        p.lo |= w.lo;
+        p.hi |= w.hi;
+    }
+    for (uint64_t b = vw; b; b &= b - 1) {
+        const Points& w = WALL_PTS[1][std::countr_zero(b)];
+        p.lo |= w.lo;
+        p.hi |= w.hi;
+    }
+    return p;
+}
+
+bool may_disconnect(const Points& barrier, Move wall) {
+    const Points& w = is_hwall(wall) ? WALL_PTS[0][wall - H_BASE] : WALL_PTS[1][wall - V_BASE];
+    return std::popcount(w.lo & barrier.lo) + std::popcount(w.hi & barrier.hi) >= 2;
+}
+
+void touching_slots(Move m, uint64_t& h, uint64_t& v) {
+    const int o = is_hwall(m) ? 0 : 1;
+    const int a = o == 0 ? m - H_BASE : m - V_BASE;
+    h = TOUCH[o][a][0];
+    v = TOUCH[o][a][1];
+}
 
 int Board::distance(int player) const { return flood_distance(open, pawn[player], GOAL[player]); }
 
 int Board::distance_with_wall(int player, Move wall) const {
     BB o[4] = {open[0], open[1], open[2], open[3]};
-    if (is_hwall(wall)) {
-        int a = wall - H_BASE;
-        o[SOUTH] &= ~WALL_CLEAR_A[0][a];
-        o[NORTH] &= ~WALL_CLEAR_B[0][a];
-    } else {
-        int a = wall - V_BASE;
-        o[EAST] &= ~WALL_CLEAR_A[1][a];
-        o[WEST] &= ~WALL_CLEAR_B[1][a];
-    }
+    clear_wall(o, wall);
     return flood_distance(o, pawn[player], GOAL[player]);
 }
 
-void Board::goal_layers(int player, GoalLayers& out, int stop_sq) const {
+void Board::goal_layers(int player, GoalLayers& out, int stop_sq) const { goal_layers_open(open, player, out, stop_sq); }
+
+void goal_layers_open(const BB* open, int player, GoalLayers& out, int stop_sq) {
     BB front = GOAL[player], seen = front;
     int k = 0;
     out.layer[0] = front;
     while (true) {
         if (stop_sq >= 0 && front.test(stop_sq)) break;
-        BB next = expand(front) & ~seen;
+        BB next = expand_open(open, front) & ~seen;
         if (!next.any()) break;
         out.layer[++k] = next;
         seen |= next;
@@ -203,14 +277,18 @@ void Board::goal_layers(int player, GoalLayers& out, int stop_sq) const {
 }
 
 PathCut Board::shortest_path_cuts(int player, const GoalLayers& gl) const {
+    return path_cuts_open(open, pawn[player], gl);
+}
+
+PathCut path_cuts_open(const BB* open, int pawn_sq, const GoalLayers& gl) {
     PathCut cut;
-    const int D = gl.dist(pawn[player]);
+    const int D = gl.dist(pawn_sq);
     if (D <= 0) return cut;
     // Walk from the pawn, always stepping one layer closer to the goal. The
     // squares visited at step d are exactly those with dist_from_pawn == d and
     // dist_to_goal == D - d, i.e. the squares on some shortest path.
     BB vert{}, horz{};  // edges used: indexed by the upper square / the left square
-    BB cur = BB::square(pawn[player]);
+    BB cur = BB::square(pawn_sq);
     for (int d = 0; d < D; ++d) {
         const BB target = gl.layer[D - d - 1];
         BB n = (cur & open[NORTH]).shr(N) & target;
@@ -235,6 +313,131 @@ PathCut Board::shortest_path_cuts(int player, const GoalLayers& gl) const {
         if (r > 0) cut.v |= bits << ((r - 1) * NW);
     }
     return cut;
+}
+
+// --------------------------------------------------------------------------
+// Blockability (see board.h). Cost: one goal flood, one walk over the
+// shortest-path DAG, and one or two early-exit BFS per bottleneck slot.
+// --------------------------------------------------------------------------
+Blockability analyse_blockability(const Layout& lay, int target, int limit, bool exact) {
+    Blockability res;
+    const int other = target ^ 1;
+    GoalLayers gl;
+    goal_layers_open(lay.open, target, gl, lay.pawn[target]);
+    const int D = gl.dist(lay.pawn[target]);
+    if (D <= 0) return res;  // on the goal row (or cut off): nothing left to block
+    const uint64_t fh = free_h_of(lay.hw, lay.vw), fv = free_v_of(lay.hw, lay.vw);
+    const Points barrier = barrier_points(lay.hw, lay.vw);
+    bool legal_cut = false, blocked_by_other = false;
+
+    // Tests one slot. Returns the new distance (> D), or -1 if the wall is illegal.
+    auto test = [&](Move m, bool& sure_legal) -> int {
+        const bool risky = may_disconnect(barrier, m);
+        sure_legal = !risky;
+        BB t[4] = {lay.open[0], lay.open[1], lay.open[2], lay.open[3]};
+        clear_wall(t, m);
+        const int nd = flood_distance(t, lay.pawn[target], GOAL[target]);
+        if (nd < 0) return -1;  // cuts the target off: illegal, and stays illegal forever
+        legal_cut = true;
+        if (exact && risky && flood_distance(t, lay.pawn[other], GOAL[other]) < 0) {
+            blocked_by_other = true;  // illegal only while the other player needs this edge
+            return -1;
+        }
+        return nd;
+    };
+
+    BB cur = BB::square(lay.pawn[target]);
+    for (int d = 0; d < D; ++d) {
+        const BB tl = gl.layer[D - d - 1];
+        const BB n = (cur & lay.open[NORTH]).shr(N) & tl;
+        const BB s = (cur & lay.open[SOUTH]).shl(N) & tl;
+        const BB w = (cur & lay.open[WEST]).shr(1) & tl;
+        const BB e = (cur & lay.open[EAST]).shl(1) & tl;
+        cur = n | s | w | e;
+        // Edges of this layer: vertical ones by their upper square, horizontal by their left square.
+        const BB vert = n | s.shr(N), horz = w | e.shr(1);
+        const int nv = popcount(vert), nh = popcount(horz);
+        // Every free slot cutting at least one edge of the layer ...
+        uint64_t ah = 0, av = 0;
+        for (BB x = vert; x.any();) {
+            const int q = lowest_square(x), r = q / N, c = q % N;
+            x = x & ~BB::square(q);
+            if (c > 0) ah |= 1ULL << (r * NW + c - 1);  // horizontal walls at (r, c-1), (r, c)
+            if (c < NW) ah |= 1ULL << (r * NW + c);
+        }
+        for (BB x = horz; x.any();) {
+            const int q = lowest_square(x), r = q / N, c = q % N;
+            x = x & ~BB::square(q);
+            if (r > 0) av |= 1ULL << ((r - 1) * NW + c);  // vertical walls at (r-1, c), (r, c)
+            if (r < NW) av |= 1ULL << (r * NW + c);
+        }
+        ah &= fh;
+        av &= fv;
+        // ... and the ones cutting ALL of them (a bottleneck: one edge, or two side by side).
+        uint64_t ch = 0, cv = 0;
+        if (nv + nh == 1) {
+            ch = ah;
+            cv = av;
+        } else if (nv == 2 && nh == 0) {
+            const int q = lowest_square(vert), r = q / N, c = q % N;
+            if (c < NW && vert == (BB::square(q) | BB::square(q + 1))) ch = ah & (1ULL << (r * NW + c));
+        } else if (nh == 2 && nv == 0) {
+            const int q = lowest_square(horz), r = q / N, c = q % N;
+            if (r < NW && horz == (BB::square(q) | BB::square(q + N))) cv = av & (1ULL << (r * NW + c));
+        }
+        bool found = false;
+        for (int o = 0; o < 2 && !(found && !exact); ++o)
+            for (uint64_t b = o == 0 ? ch : cv; b; b &= b - 1) {
+                const Move m = o == 0 ? hwall_move(std::countr_zero(b)) : vwall_move(std::countr_zero(b));
+                bool sure;
+                if (!exact && !may_disconnect(barrier, m)) {  // legal for sure, and it cuts every path: gain >= 1
+                    legal_cut = found = true;
+                    if (res.best_gain < 1) {
+                        res.best_gain = 1;
+                        res.best_wall = m;
+                    }
+                    break;
+                }
+                const int nd = test(m, sure);
+                if (nd < 0) continue;
+                found = true;
+                if (nd - D > res.best_gain) {
+                    res.best_gain = nd - D;
+                    res.best_wall = m;
+                }
+                if (!exact) break;
+            }
+        if (found) {
+            ++res.opportunities;
+        } else {
+            // No single wall closes this layer. If a legal wall still cuts part of it,
+            // two or more walls can (a "soft" layer: several routes side by side).
+            for (int o = 0; o < 2; ++o) {
+                bool soft = false;
+                for (uint64_t b = (o == 0 ? ah & ~ch : av & ~cv); b; b &= b - 1) {
+                    const Move m = o == 0 ? hwall_move(std::countr_zero(b)) : vwall_move(std::countr_zero(b));
+                    if (!may_disconnect(barrier, m)) {
+                        soft = legal_cut = true;
+                        break;
+                    }
+                    bool sure;
+                    if (test(m, sure) >= 0) {
+                        soft = true;
+                        break;
+                    }
+                }
+                if (soft) {
+                    ++res.soft;
+                    break;
+                }
+            }
+        }
+        if (res.opportunities + res.soft >= limit || res.soft >= 2) return res;
+    }
+    // Proof of a permanent lock: no free slot cutting any shortest-path edge keeps the
+    // target connected. Walls are only ever added, so none of them ever will.
+    res.locked = !legal_cut && !blocked_by_other;
+    return res;
 }
 
 // --------------------------------------------------------------------------

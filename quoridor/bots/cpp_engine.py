@@ -186,8 +186,12 @@ class CppEngine:
             [path], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
         _running.add(self)
         self.info_lines: list[str] = []
-        for name, value in (options or {}).items():
-            self.set_option(name, value)
+        try:
+            for name, value in (options or {}).items():
+                self.set_option(name, value)
+        except EngineError:
+            self.close()  # don't leave a half-configured process behind
+            raise
 
     # -- low level -------------------------------------------------------
     def command(self, line: str) -> str:

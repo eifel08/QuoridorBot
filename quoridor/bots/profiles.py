@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import random
+import threading
 from pathlib import Path
 from typing import Mapping, Optional
 
@@ -53,6 +54,29 @@ def engine_binary(name: str) -> Path:
     import os
     exe = name + (".exe" if os.name == "nt" else "")
     return BUILD_DIR / exe
+
+
+_REBUILD_LOCK = threading.Lock()
+_rebuilt: dict[str, str] = {}
+
+
+def rebuild_engine(stale: Path, reason: Exception) -> str:
+    """Recompile the engine (``python build_engine.py``) because ``stale`` is out of date."""
+    from .cpp_engine import build
+
+    with _REBUILD_LOCK:  # the GUI and the analyser may both get here
+        if str(stale) in _rebuilt:
+            return _rebuilt[str(stale)]
+        print(f"The C++ engine {stale} is older than this code ({reason}); rebuilding it...", flush=True)
+        try:
+            path = build(verbose=False)
+        except EngineError as exc:
+            raise EngineError(
+                f"The C++ engine {stale} is out of date ({reason}) and could not be rebuilt "
+                f"automatically. Rebuild it with:  python build_engine.py   (details: {exc})") from None
+        print(f"Rebuilt the C++ engine: {path}", flush=True)
+        _rebuilt[str(stale)] = path
+        return path
 
 
 def _fallback_binary(missing: Path) -> Path:
@@ -168,7 +192,15 @@ class ProfileEngine:
         binary = engine_binary(prof.get("binary", "quoridor_engine"))
         if not binary.is_file():
             binary = _fallback_binary(binary)
-        self.engine = CppEngine(str(binary), profile_options(name, options))
+        try:
+            self.engine = CppEngine(str(binary), profile_options(name, options))
+        except EngineError as exc:
+            if "unknown option" not in str(exc) or prof.get("binary"):
+                raise
+            # An executable built before the profile options existed (e.g. after a git pull):
+            # rebuild it once from the current sources and try again.
+            binary = Path(rebuild_engine(binary, exc))
+            self.engine = CppEngine(str(binary), profile_options(name, options))
         if prof.get("linear"):
             if not LINEAR_WEIGHTS.is_file():
                 raise EngineError(f"{LINEAR_WEIGHTS} missing (python -m tools.texel_tune)")

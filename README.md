@@ -322,6 +322,7 @@ permission for the terminal or Python.
 | `python main.py --autoplay-demo blue` | the same with the bot as Blue (the opponent moves first) |
 | `python main.py --autoplay --click-profile my.json` | how moves are entered on your site (see below) |
 | `python main.py --autoplay --join` | also take over a game that is already running |
+| `python main.py --autoplay --continuous` | Continuous Play on from the start: play game after game |
 
 The desktop start menu (`python main.py`) has its own **Auto-Play Mode** button above
 *Screen Assistant*. `--monitor`, `--scan-fps`, `--debug-preview` and `--vision-profile` work as
@@ -341,6 +342,25 @@ folded *Bot settings* stay in sync with it. The presets are in `quoridor/bots/pr
 **It starts switched off.** Open the game so that the start position is visible, then press
 **Start auto-play** in the panel (`--armed` presses it at launch). The button turns into a red
 **STOP**.
+
+### Continuous Play
+
+By default Auto-Play plays **one game**: when that game is over it switches itself off. Tick
+**Continuous Play** under the Start button (or pass `--continuous`) and it keeps going:
+
+| State | Panel | What it does |
+|---|---|---|
+| `SEARCHING FOR GAME` | `Searching for new game...` | watches the screen (a full-screen search every ~0.6 s while no board is found) for a 9x9 board in its **start position**. Never clicks. |
+| in game | `WAITING FOR OPPONENT`, `THINKING`, ... | a start position seen in 2 frames in a row starts a game: the old game's move count, board, colour lock, pending move and turn timers are cleared, the bottom player's colour and goal are read again (pawns, edge tints, player cards), and it plays as usual. |
+| `GAME OVER` | `Game over: ...` | entered when a pawn reaches its goal row, or when no readable board has been seen for 3 s (a result banner over the board, *Rematch* / *New game* dialogs, or the lobby). The result is logged and counted in the panel, the screen reader forgets the old board, and after a 2 s cool-down it goes back to searching. Never clicks. |
+
+The finished game's final board is never taken for a new game, even if it stays on the screen,
+so the bot waits until the site actually shows a new start position. It does not click anything
+in menus or lobbies: starting the next game (*Rematch*, *New game*) is up to you or the site.
+If a new start position appears without the end of the last game being seen (a resignation),
+the old game is closed and the new one begins. With *Join a game in progress* also ticked, it may
+take over a running game instead of waiting for a start position (but never the board of the game
+that just finished). Esc, the screen corners and STOP work in every state, between games too.
 
 ### What happens on its turn
 

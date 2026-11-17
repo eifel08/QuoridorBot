@@ -54,7 +54,7 @@ def fast_profile(**changes):
 class Sim:
     """A mock game on a mock screen: renders frames, feeds parser, tracker and the auto-player."""
 
-    def __init__(self, flipped=False, layout="timed", profile=None, join=False, **render_args):
+    def __init__(self, flipped=False, layout="timed", profile=None, join=False, continuous=False, **render_args):
         self.flipped = flipped
         self.bottom = BLUE if flipped else RED
         self.pos = Position(((0, 4), (8, 4)) if flipped else ((8, 4), (0, 4)), (), (10, 10), RED, flipped)
@@ -66,7 +66,9 @@ class Sim:
         self.mouse = FakeMouse()
         self.stop = StopSwitch()
         self.player = AutoPlayer(self.mouse, profile or fast_profile(), self.stop, join_in_progress=join,
-                                 clock=lambda: self.now, threaded=False)
+                                 clock=lambda: self.now, threaded=False, continuous=continuous)
+        self.player.on_game_end = lambda _result: (self.parser.reset(), self.tracker.reset())
+        self.blank = False      # True: the board is gone from the screen (result screen, lobby)
         self.plan = {}          # notation the "engine" plays, by move count of the bot
         self.number = 0
         self.geometry = None
@@ -76,6 +78,8 @@ class Sim:
                     flipped=self.flipped, clocks=self.clocks)
         args.update(self.render_args)
         image, self.geometry = render(**args)
+        if self.blank:
+            image = image * 0 + 40
         res = self.parser.parse(image)
         self.tracker.update(res)
         self.number += 1
@@ -98,6 +102,12 @@ class Sim:
     def play(self, player, notation):
         """A move appears on the mock screen (made by the site, i.e. by the opponent or by a registered click)."""
         self.pos = position_after(self.pos, player, parse_notation(notation))
+
+    def new_game(self, flipped):
+        """The site shows the start position of a new game, with the bot's side on ``flipped``."""
+        self.flipped, self.blank = flipped, False
+        self.bottom = BLUE if flipped else RED
+        self.pos = Position(((0, 4), (8, 4)) if flipped else ((8, 4), (0, 4)), (), (10, 10), RED, flipped)
 
     def cell_center(self, notation):
         m = parse_notation(notation)
@@ -513,6 +523,108 @@ class TestClocks(unittest.TestCase):
         self.assertEqual(watcher.highlight_turn(), BLUE)
         show(RED)
         self.assertEqual(watcher.highlight_turn(), RED)
+
+
+@needs_cv
+class TestContinuousPlay(unittest.TestCase):
+    """Searching -> in game -> game over -> searching, with no clicks outside a game."""
+
+    def opponent_wins(self, sim):
+        """Blue's pawn turns up on its goal row (the game is decided)."""
+        pawns = list(sim.pos.pawns)
+        pawns[BLUE] = (8, 0)
+        sim.pos = Position((pawns[0], pawns[1]), sim.pos.walls, sim.pos.walls_left, RED, sim.flipped)
+
+    def test_plays_game_after_game(self):
+        sim = Sim(continuous=True)
+        sim.plan = {0: "e2"}
+        sim.player.arm()
+        self.assertEqual((sim.player.state, sim.player.message), ("searching", "Searching for new game..."))
+        sim.step(6)
+        self.assertEqual(sim.player.me, RED)
+        sim.play(RED, "e2")
+        sim.step(4)
+        self.opponent_wins(sim)
+        sim.step(4)
+        self.assertEqual(sim.player.state, "over")
+        self.assertTrue(sim.player.armed)
+        self.assertEqual(sim.player.games, ["the opponent won"])
+        self.assertIsNone(sim.player.identity)
+        self.assertIsNone(sim.player.ply)
+        clicks = len(sim.mouse.clicks)
+        sim.step(30)                                   # cool-down, then searching: the final board stays up
+        self.assertEqual(sim.player.state, "searching")
+        self.assertEqual(len(sim.mouse.clicks), clicks)  # never clicks between games
+        sim.new_game(flipped=True)                      # next game: the bot has Blue now
+        sim.step(8)
+        self.assertEqual((sim.player.me, sim.player.ply, sim.player.state), (BLUE, 0, "opponent"))
+        self.assertEqual(len(sim.mouse.clicks), clicks)  # Red moves first
+        sim.play(RED, "e8")
+        sim.step(8)
+        self.assertEqual(len(sim.mouse.clicks), clicks + 1)
+        self.assertEqual(sim.player.ply, 1)
+
+    def test_board_disappearing_ends_the_game(self):
+        sim = Sim(continuous=True, flipped=True)        # the bot is Blue: waiting for Red
+        sim.player.arm()
+        sim.step(6)
+        self.assertEqual(sim.player.state, "opponent")
+        sim.blank = True                                # a result screen covers the board / back to the lobby
+        sim.step(10)                                    # 2 s: could still be a redraw
+        self.assertEqual(sim.player.state, "opponent")
+        sim.step(10)
+        self.assertIn(sim.player.state, ("over", "searching"))
+        self.assertIn("no longer visible", sim.player.games[-1])
+        sim.step(20)
+        self.assertEqual(sim.player.state, "searching")
+        self.assertEqual(sim.mouse.clicks, [])
+        sim.new_game(flipped=False)                     # a new game, the bot is Red and moves first
+        sim.step(8)
+        self.assertEqual(sim.player.me, RED)
+        self.assertEqual(len(sim.mouse.clicks), 1)
+
+    def test_new_game_needs_a_stable_start_position(self):
+        sim = Sim(continuous=True)
+        sim.player.arm()
+        sim.step(1)
+        self.assertIsNone(sim.player.identity)
+        sim.step(5)
+        self.assertEqual(sim.player.me, RED)
+
+    def test_single_game_switches_off_at_the_end(self):
+        sim = Sim()                                     # Continuous Play off
+        sim.plan = {0: "e2"}
+        sim.player.arm()
+        sim.step(6)
+        sim.play(RED, "e2")
+        sim.step(4)
+        self.opponent_wins(sim)
+        sim.step(4)
+        self.assertFalse(sim.player.armed)
+        self.assertIn("Continuous Play is off", sim.player.message)
+        sim.new_game(flipped=False)
+        sim.step(10)
+        self.assertEqual(len(sim.mouse.clicks), 1)       # the next game is not played
+
+    def test_esc_stops_while_searching(self):
+        sim = Sim(continuous=True)
+        sim.blank = True
+        sim.player.arm()
+        sim.step(4)
+        sim.stop.trigger("Esc pressed")
+        sim.step(2)
+        self.assertFalse(sim.player.armed)
+        sim.new_game(flipped=False)
+        sim.step(8)
+        self.assertEqual(sim.mouse.clicks, [])
+
+    def test_never_clicks_outside_a_game(self):
+        sim = Sim(continuous=True)
+        sim.step(2)
+        sim.player.armed = True
+        sim.player.state = "searching"
+        sim.player._start_move(sim.tracker.current, parse_notation("e2"), retries=0)
+        self.assertEqual(sim.mouse.clicks, [])
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ from .app import (BG, BLUE_HEX, CARD, DIM, GOOD, MARK, RED_HEX, TEXT, WALL_LABEL
 from .autoplay import WALL_CLICKS, AutoPlayer, ClickProfile, EmergencyStop, PyAutoGuiMouse, StopSwitch, wall_points
 from .parser import Profile
 
-STATE_TEXT = {"off": "OFF", "waiting-start": "WAITING FOR A GAME", "opponent": "WAITING FOR OPPONENT",
+STATE_TEXT = {"off": "OFF", "waiting-start": "WAITING FOR A GAME", "searching": "SEARCHING FOR GAME", "opponent": "WAITING FOR OPPONENT",
               "thinking": "THINKING", "highlighting": "ABOUT TO PLAY", "moving": "CLICKING",
               "confirming": "CLICKED", "over": "GAME OVER"}
 #: While the bot is about to click or clicking, a new bot only takes over after that move.
@@ -34,14 +34,16 @@ class AutoPlayApp(AssistantApp):
 
     def __init__(self, spec=DEFAULT_SPEC, monitor: int = 1, fps: float = 5.0, profile: Optional[Profile] = None,
                  debug: bool = False, click_profile: Optional[ClickProfile] = None, join_in_progress: bool = False,
-                 mouse=None, grabber=None) -> None:
+                 mouse=None, grabber=None, continuous: bool = False) -> None:
         # Before pyautogui is loaded: it would make the process only "system" DPI aware on
         # Windows, and clicks would then miss on scaled or mixed-DPI monitors.
         enable_dpi_awareness()
         self.stop = StopSwitch()
         self.click_profile = click_profile or ClickProfile()
-        self.player = AutoPlayer(mouse or PyAutoGuiMouse(), self.click_profile, self.stop, join_in_progress)
+        self.player = AutoPlayer(mouse or PyAutoGuiMouse(), self.click_profile, self.stop, join_in_progress,
+                                 continuous=continuous)
         self.player.before_click = self._before_click
+        self.player.on_game_end = self._on_game_end
         self._hover_test = 0
         self._pending_spec: Optional[BotSpec] = None
         super().__init__(spec, monitor, fps, profile, debug, overlay=False, grabber=grabber)
@@ -93,6 +95,13 @@ class AutoPlayApp(AssistantApp):
                                      activebackground="#3c9a59", activeforeground="white", relief="flat",
                                      font=("Segoe UI", 11, "bold"))
         self.auto_button.pack(fill="x", padx=10, pady=(8, 4))
+        # Continuous Play: after a game, search for the next one and play it too.
+        self.continuous_var = tk.BooleanVar(value=self.player.continuous)
+        tk.Checkbutton(box, text="Continuous Play (keep playing new games)", variable=self.continuous_var, bg=CARD,
+                       fg=TEXT, selectcolor=BG, activebackground=CARD, activeforeground=TEXT,
+                       anchor="w").pack(fill="x", padx=6)
+        self.games_label = self._label(box, "", DIM, 9, wraplength=280)
+        self.games_label.pack(fill="x", padx=10)
         self.stop_hint = self._label(box, "Emergency stop: Esc, or move the mouse into a screen corner.", WARN, 9,
                                      wraplength=280)
         self.stop_hint.pack(fill="x", padx=10)
@@ -167,6 +176,15 @@ class AutoPlayApp(AssistantApp):
         self.analyzer.set_spec(spec, current)
         self.player.log(f"Bot: {spec.label()} ({spec.to_string()})")
 
+    def _on_game_end(self, result: str) -> None:
+        """A game ended: forget its board (the next game may be elsewhere on the screen) and its analysis."""
+        self.watcher.rescan()
+        self.tracker.counted_turn = None
+        with self._lock:
+            self._analysis = None
+            self._searching = None
+        self.overlay.hide(force=True)
+
     def _toggle_auto(self) -> None:
         if self.player.armed:
             self.stop.trigger("STOP button")
@@ -217,6 +235,7 @@ class AutoPlayApp(AssistantApp):
         player = self.player
         self.click_profile.wall_click = self.wall_var.get() if not player.state == "moving" else self.click_profile.wall_click
         player.join_in_progress = self.join_var.get()
+        player.continuous = self.continuous_var.get()
         if self._pending_spec is not None and player.state not in BUSY_STATES:
             self._set_spec(self._pending_spec)
         if self._pending_spec is None:
@@ -234,7 +253,7 @@ class AutoPlayApp(AssistantApp):
         # the exact move count is the best turn indicator there is: let the panel and the analysis use it
         self.tracker.counted_turn = None if player.ply is None else player.ply % 2
 
-        colour = {"off": DIM, "waiting-start": WARN, "opponent": TEXT, "thinking": GOOD, "highlighting": MARK,
+        colour = {"off": DIM, "waiting-start": WARN, "searching": WARN, "opponent": TEXT, "thinking": GOOD, "highlighting": MARK,
                   "moving": GOOD, "confirming": GOOD, "over": WARN}[player.state]
         if not player.armed and player.message.startswith(("STOPPED", "Stopped")):
             colour = RED_HEX
@@ -254,6 +273,13 @@ class AutoPlayApp(AssistantApp):
         # the last steps, one line each (the console has them in full)
         lines = [line[9:] if len(line) > 9 else line for line in list(player.log_lines)[-4:]]
         self.auto_log.config(text="\n".join(line if len(line) <= 42 else line[:41] + "…" for line in lines))
+        if player.games:
+            won = sum(1 for g in player.games if g.startswith("the bot won"))
+            self.games_label.config(text=f"Games finished: {len(player.games)} (bot won {won}) · "
+                                         f"last: {player.games[-1]}")
+        else:
+            self.games_label.config(text="Continuous Play: after a game, the bot waits for the next one."
+                                    if player.continuous else "")
         if player.armed:
             self.auto_button.config(text="STOP (Esc)", bg="#b3261e", activebackground="#d0342c")
         else:

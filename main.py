@@ -91,6 +91,9 @@ def main() -> None:
                         help="Auto-Play: how moves are entered on the site (wall click point, pauses; see README)")
     parser.add_argument("--armed", action="store_true",
                         help="Auto-Play: switched on from the start instead of waiting for the Start button")
+    parser.add_argument("--continuous", action="store_true",
+                        help="Auto-Play: Continuous Play on from the start: after a game ends, wait for the next "
+                             "one and play it too")
     parser.add_argument("--join", action="store_true",
                         help="Auto-Play: also take over a game that is already in progress")
     parser.add_argument("--monitor", type=int, default=1,
@@ -154,7 +157,8 @@ def main() -> None:
             if wall_filter is not None and spec.kind == "ab" and "wall_filter" not in dict(spec.options):
                 spec = spec.with_wall_filter(wall_filter)
             run_autoplay(spec, args.monitor, args.scan_fps, args.vision_profile, args.debug_preview,
-                         args.click_profile, args.join, demo=args.autoplay_demo, armed=args.armed)
+                         args.click_profile, args.join, demo=args.autoplay_demo, armed=args.armed,
+                         continuous=args.continuous)
         except ImportError as exc:
             sys.exit(f"Could not start Auto-Play ({exc}).\n{missing_hint(exc)}")
         except (ValueError, FileNotFoundError) as exc:

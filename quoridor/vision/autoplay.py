@@ -14,8 +14,14 @@ holds everything that does not need a window:
   from several signals whether it is really its turn, performs the engine's
   move, and waits until the board shows that move before doing anything else.
 
-Safety: the bot never clicks unless it is armed, the move count says it is
-its turn, and no other signal says it is the opponent's. :class:`StopSwitch`
+With *Continuous Play* on, the bot does not stop when a game ends. It cycles
+``searching`` (no game: watch the screen, never click) -> in-game -> ``over``
+(a short cool-down, never click) -> ``searching`` again, re-detecting its colour
+at every new start position. With it off, auto-play switches itself off once
+the game is over.
+
+Safety: the bot never clicks unless it is armed, in a game, the move count says
+it is its turn, and no other signal says it is the opponent's. :class:`StopSwitch`
 (Esc, the panel's button, or the mouse in a screen corner) halts it at once,
 also in the middle of a mouse movement.
 """
@@ -485,21 +491,30 @@ class AutoPlayer:
     SOFT_OVERRIDE = 6.0     # seconds after which a lone, fallible signal (move list, highlight) is overruled
     OUTLINE_WAIT = 5.0      # seconds to wait for legal-move outlines once the site has shown them before
     CONFIRM_FRAMES = 2      # frames in a row that must show the expected board
+    NEW_GAME_FRAMES = 2     # Continuous Play: frames in a row showing a start position before a game begins
+    BOARD_GONE = 3.0        # Continuous Play: seconds without a readable board that end the game (modal, lobby)
+    COOLDOWN = 2.0          # Continuous Play: seconds in "over" before searching for the next game
+    #: States in which the bot is playing a game; the only ones in which it may click.
+    IN_GAME = ("opponent", "thinking", "highlighting", "moving", "confirming")
 
     def __init__(self, mouse, profile: Optional[ClickProfile] = None, stop: Optional[StopSwitch] = None,
                  join_in_progress: bool = False, clock: Callable[[], float] = time.monotonic,
-                 threaded: bool = True) -> None:
+                 threaded: bool = True, continuous: bool = False) -> None:
         self.profile = profile or ClickProfile()
         self.stop = stop or StopSwitch()
         self.hand = Hand(mouse, self.profile, self.stop)
         self.clocks = ClockWatcher()
         self.join_in_progress = join_in_progress
+        #: Continuous Play: keep going from one game to the next instead of stopping after one.
+        self.continuous = continuous
         self._clock = clock
         self._threaded = threaded
         self.armed = False
         self.identity: Optional[Identity] = None
         self.ply: Optional[int] = None          # moves played so far, counted from the start position
-        self.state = "off"                      # off, waiting-start, opponent, thinking, highlighting, moving, confirming, over
+        #: off, waiting-start (one game), searching (Continuous Play), opponent, thinking,
+        #: highlighting, moving, confirming, over
+        self.state = "off"
         self.message = "Auto-play is off"
         self.signals = Signals()
         self.last_move = ""                     # notation of the move last played by the bot
@@ -523,6 +538,14 @@ class AutoPlayer:
         #: Called in the thread that calls tick(), right before the mouse starts moving,
         #: so the window can hide its move marker and the click lands on the game.
         self.before_click: Optional[Callable[[], None]] = None
+        #: Called (in the tick() thread) when a game ends, with the result text, e.g. so
+        #: the window can make the screen reader forget the old board.
+        self.on_game_end: Optional[Callable[[str], None]] = None
+        self.games: list[str] = []              # results of the games finished while armed
+        self._last_readable: Optional[float] = None   # last time the frame showed a readable board
+        self._start_frames = 0                  # consecutive new frames showing a start position
+        self._finished: Optional[Position] = None     # final board of the last game: never joined again
+        self._over_until = 0.0
         self.log_lines: deque = deque(maxlen=8)
         self._noted = ""
 
@@ -545,15 +568,27 @@ class AutoPlayer:
     def me(self) -> Optional[int]:
         return self.identity.me if self.identity else None
 
+    @property
+    def in_game(self) -> bool:
+        return self.armed and self.identity is not None and self.state in self.IN_GAME
+
+    def _wait_message(self) -> str:
+        return "Searching for new game..." if self.continuous else "Waiting for the start position of a game..."
+
+    def _waiting_state(self) -> str:
+        return "searching" if self.continuous else "waiting-start"
+
     def arm(self) -> None:
         self.stop.clear()
         self.armed = True
         self._my_turn_since = None
-        self.log("Auto-play switched on")
+        self._last_readable = None
+        self._start_frames = 0
+        self.log("Auto-play switched on" + (" (Continuous Play)" if self.continuous else ""))
         if self.identity is not None and self.ply is not None:
             self._note("opponent", "Waiting for opponent...")  # carry on with the game being followed
-        elif self.state in ("off", "over"):
-            self._note("waiting-start", "Waiting for the start position of a game...")
+        elif self.state in ("off", "over", "waiting-start", "searching"):
+            self._note(self._waiting_state(), self._wait_message())
 
     def disarm(self, message: str = "Auto-play is off") -> None:
         self.armed = False
@@ -585,8 +620,25 @@ class AutoPlayer:
         res = frame.result
         live = self._live_position(res, current)
 
+        if res.ok:
+            self._last_readable = now
+        elif self._last_readable is None:
+            self._last_readable = now
+        if self.armed and self.state == "over":
+            # Game over / cool-down: never click, just wait, then search for the next game.
+            if now < self._over_until:
+                return
+            self._note(self._waiting_state(), self._wait_message())
+        if self.armed and self.state in ("waiting-start", "searching") and self.identity is None:
+            if self._searching_step(res, live, new_frame):
+                return
         self._follow_game(res, current, live)
         if not self.armed or self.identity is None:
+            return
+        if self.state in ("waiting-start", "searching", "off"):
+            # armed with the colour already locked (e.g. joined while switched off): play on by the turn signals
+            self._note("opponent", "Waiting for a sign that it is my turn...")
+        if self._check_game_end(res, current, live, now):
             return
         if self.state == "confirming":
             if new_frame:
@@ -597,10 +649,87 @@ class AutoPlayer:
             return
         if live is None or current is None:
             return  # frame unreadable or the board is still changing
-        if current.winner is not None:
-            self._note("over", "Game over: " + ("the bot won" if current.winner == self.me else "the opponent won"))
-            return
         self._decide(res, current, analysis, now)
+
+    # -- game lifecycle (Continuous Play) -----------------------------------------------
+    def _searching_step(self, res: ParseResult, live: Optional[Position], new_frame: bool) -> bool:
+        """While no game is followed. Returns True to skip the rest of the tick (no game yet)."""
+        if live is not None and self._finished is not None and same_board(live, self._finished):
+            self._start_frames = 0
+            self._note(self._waiting_state(), self._wait_message() + " (the last game's final board is still shown)")
+            return True
+        if not self.continuous:
+            return False
+        identity, _ = identify_bottom_player(res, require_start=True) if live is not None else (None, "")
+        if identity is None:
+            self._start_frames = 0
+            if not (self.join_in_progress and live is not None and live.winner is None):
+                self._note("searching", self._wait_message())
+                return True
+            return False
+        if new_frame:
+            self._start_frames += 1
+        if self._start_frames < self.NEW_GAME_FRAMES:
+            self._note("searching", "New game found, checking that the board is stable...")
+            return True
+        return False
+
+    def _check_game_end(self, res: ParseResult, current: Optional[Position], live: Optional[Position],
+                        now: float) -> bool:
+        """Has the game being played ended? Ends it and returns True if so."""
+        if self.state == "moving":
+            return False   # the mouse is busy: decided once the click is done
+        board = live if live is not None else (current if current is not None and res.ok else None)
+        if board is not None and board.winner is not None and same_board(board, self._board or board):
+            self._end_game("the bot won" if board.winner == self.me else "the opponent won", board)
+            return True
+        if self.state == "confirming" and self._expected is not None and self._expected.winner == self.me \
+                and not res.ok and self._last_readable is not None and now - self._last_readable > 0.5:
+            # the winning move was clicked and the site covered the board with its result screen
+            self._end_game("the bot won (its winning move was followed by a result screen)", self._expected)
+            return True
+        if self.continuous and self._last_readable is not None and now - self._last_readable >= self.BOARD_GONE:
+            self._end_game("the board is no longer visible (result screen, menu or lobby)", None)
+            return True
+        return False
+
+    def _end_game(self, result: str, final: Optional[Position]) -> None:
+        """Clear everything about the finished game; search for the next one, or switch off.
+
+        ``final``: the finished game's last board, if it is still on the screen. It is
+        never taken for a new game (only a decided board is passed: never a start position).
+        """
+        moves = "?" if self.ply is None else str(self.ply)
+        colour = PLAYER_NAMES[self.me] if self.me is not None else "?"
+        text = f"Game over: {result} (played as {colour}, {moves} moves, {self.moves_made} by the bot)"
+        self.games.append(result)
+        self.log(text)
+        self._finished = final
+        self._reset_game()
+        if self.on_game_end is not None:
+            try:
+                self.on_game_end(result)
+            except Exception as exc:
+                self.log(f"game-end hook failed: {exc}")
+        if self.continuous:
+            self._over_until = self._clock() + self.COOLDOWN
+            self.state, self.message = "over", text + ". Searching for the next game shortly..."
+            self._noted = self.message
+        else:
+            self.disarm(text + ". Auto-play stopped (Continuous Play is off).")
+
+    def _reset_game(self) -> None:
+        """Forget the game: move count, board, colour lock, pending move, turn timers, clock history."""
+        self.identity, self.ply, self._board = None, None, None
+        self._expected = self._pending = self._before = self.planned = None
+        self._my_turn_since = None
+        self._outlines_seen = False
+        self._start_frames = 0
+        self._retries_left = 0
+        self.moves_made = 0
+        self.last_move = ""
+        self.signals = Signals()
+        self.clocks.reset()
 
     @staticmethod
     def _live_position(res: ParseResult, current: Optional[Position]) -> Optional[Position]:
@@ -622,6 +751,14 @@ class AutoPlayer:
                 self.message = "Start position seen, but the board orientation is unclear: set 'Red starts at'."
                 return
             new_game = self.identity is None or self.ply != 0 or self.identity.me != identity.me
+            if new_game and self.identity is not None and self.armed:
+                self.log("A new game started before the last one was seen to end")
+                self.games.append("unknown (a new game started)")
+                self._reset_game()
+            if new_game:
+                self.moves_made, self.last_move = 0, ""
+            self._finished = None
+            self._start_frames = 0
             self.identity, self.ply, self._board = identity, 0, live
             self._outlines_seen = False
             self.clocks.reset()
@@ -633,13 +770,16 @@ class AutoPlayer:
         if self.identity is None:
             if self.armed and self.join_in_progress:
                 identity, problem = identify_bottom_player(res, require_start=False)
-                if identity is not None and live.goal_rows[identity.me] == 0:
+                if identity is not None and live.goal_rows[identity.me] == 0 and live.winner is None \
+                        and not same_board(live, self._finished):
+                    self._finished = None
                     self.identity, self.ply, self._board = identity, None, live
                     self.log(f"Joined a game in progress: playing as {identity.text()}")
                     self._note("opponent", "Waiting for a sign that it is my turn...")
                     return
             if self.armed:
-                self._note("waiting-start", "Waiting: " + problem)
+                self._note(self._waiting_state(), (self._wait_message() + " " if self.continuous else "Waiting: ")
+                           + problem)
             return
         if self._board is None or same_board(live, self._board):
             return
@@ -652,7 +792,7 @@ class AutoPlayer:
                 other = self._two_moves(self._board, live, mover)
                 self.ply = self.ply + 2 if other else None
         self._board = live
-        if self.ply is None and self.armed and not self.join_in_progress:
+        if self.ply is None and self.armed and not self.join_in_progress and live.winner is None:
             self._halt("lost track of the move count (moves happened that were not seen). "
                        "Tick 'Join a game in progress' to continue by the other turn signals.")
 
@@ -773,6 +913,11 @@ class AutoPlayer:
         frame = self._latest
         if frame is None or frame.result.geometry is None:
             return
+        if not self.in_game or self.state not in ("highlighting", "confirming"):
+            # Guardrail: never click while searching for a game, after a game or switched off.
+            self.planned = None
+            self.log(f"Not clicking {move_notation(move)}: no game is being played (state {self.state})")
+            return
         self._before, self._pending, self._retries_left = current, move, retries
         self.planned = move
         self._expected = position_after(current, self.me, move)
@@ -891,6 +1036,8 @@ class AutoPlayer:
         if self._worker_error:
             self._halt(self._worker_error)
             return
+        if not self.armed or self.state != "moving":
+            return
         # State-change lock: nothing else happens until the board shows the move.
         self._note("confirming", f"Clicked {self.last_move}, waiting for the board to show it...")
         self._deadline = now + self.profile.confirm_timeout
@@ -926,6 +1073,8 @@ class AutoPlayer:
             self.log(f"{self.last_move} did not register, trying again")
             self._start_move(before, self._pending, self._retries_left - 1)
             return
+        if shown is None and self.continuous:
+            return  # board not readable: _check_game_end decides whether the game is over
         if shown == (before.pawns, before.walls):
             self._halt(f"the click for {self.last_move} did not change the board. Check the click profile "
                        "(wall_click / pawn_click) and that nothing covers the board.")

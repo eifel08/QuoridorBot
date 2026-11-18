@@ -1,0 +1,17 @@
+{
+ "h1": 64,
+ "h2": 16,
+ "K": 0.033,
+ "lambda": 0.5,
+ "val_target_logloss": 0.42101600766181946,
+ "train_positions": 821077,
+ "val_positions": 47289,
+ "data": [
+  "/home/user/QuoridorBot/data/gen1.feat.jsonl",
+  "/home/user/QuoridorBot/data/selfplay_gen2.jsonl"
+ ],
+ "wd": 0.0,
+ "lr": 0.002,
+ "epochs": 12,
+ "val_last": true
+}

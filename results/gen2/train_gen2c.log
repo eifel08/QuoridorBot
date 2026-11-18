@@ -1,0 +1,14 @@
+821077 train / 47289 val positions, K=0.0330
+epoch 1: train 0.4253  val target 0.4268  val result 0.4194  sign acc 0.777  (6s)
+epoch 2: train 0.3864  val target 0.4336  val result 0.4258  sign acc 0.777  (5s)
+epoch 3: train 0.3731  val target 0.4439  val result 0.4372  sign acc 0.773  (5s)
+epoch 4: train 0.3648  val target 0.4567  val result 0.4491  sign acc 0.773  (5s)
+epoch 5: train 0.3596  val target 0.4660  val result 0.4585  sign acc 0.772  (5s)
+epoch 6: train 0.3554  val target 0.4795  val result 0.4731  sign acc 0.767  (5s)
+epoch 7: train 0.3522  val target 0.4831  val result 0.4752  sign acc 0.770  (5s)
+epoch 8: train 0.3494  val target 0.4940  val result 0.4863  sign acc 0.769  (5s)
+epoch 9: train 0.3470  val target 0.4993  val result 0.4915  sign acc 0.767  (5s)
+epoch 10: train 0.3451  val target 0.5026  val result 0.4944  sign acc 0.767  (5s)
+epoch 11: train 0.3438  val target 0.5062  val result 0.4982  sign acc 0.766  (5s)
+epoch 12: train 0.3429  val target 0.5072  val result 0.4991  sign acc 0.766  (5s)
+wrote /home/user/QuoridorBot/engine/nets/nnue_gen2c.txt

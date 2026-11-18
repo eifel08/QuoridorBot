@@ -2,6 +2,8 @@
 
 The order comes from the round-robin tournaments in docs/bot-evolution-report.md
 (5 s per move: hybrid +222, nnue +209, tuned +36, turbo -20 Elo against the old engine).
+Hybrid and NNUE now use the generation-2 network (docs/nnue-gen2-report.md); with it NNUE
+edges Hybrid (56-44 at 0.5 s, 9-7 at 5 s), which is within noise, so the order is unchanged.
 
 Every bot is a :class:`~quoridor.bots.factory.BotSpec` of kind ``"profile"``; the GUI
 menus and the Screen Assistant / Auto-Play panel build their controls from

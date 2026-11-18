@@ -73,6 +73,13 @@ from N walls** (below that it switches to the tuned evaluation) and **exact endg
 (pruning off from there on, -1 = never). The settings are kept in the bot's spec, so the same bot
 can be given on the command line, e.g.
 `--bot profile:name=hybrid,time=3,walls=attack,book=0` (see [Bot settings](#bot-settings)).
+
+Hybrid and NNUE use the **generation-2 network** (`engine/nets/nnue.txt`), trained on 7,000
+self-play games of the generation-1 bots. It is worth about +60 to +100 Elo over generation 1
+(see [docs/nnue-gen2-report.md](docs/nnue-gen2-report.md)). The Elo column above is from the
+generation-1 tournament. The generation-1 network is kept as `engine/nets/nnue_gen1.txt` and
+can be played as `profile:name=nnue-gen1` or `profile:name=hybrid-gen1`. Retrain with
+`python -m tools.gen2_pipeline`.
 The Screen Assistant and Auto-Play panels scroll (scroll bar or mouse wheel), so every control is
 reachable on small screens.
 
